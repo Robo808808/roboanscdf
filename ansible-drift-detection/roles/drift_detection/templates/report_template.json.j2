@@ -1,0 +1,5 @@
+# roles/drift_detection/templates/report_template.json.j2
+{
+    "generated_on": "{{ ansible_date_time.iso8601 }}",
+    "drift_output": {{ drift_output | to_json }}
+}

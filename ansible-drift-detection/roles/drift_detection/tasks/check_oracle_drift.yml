@@ -1,0 +1,24 @@
+- name: Oracle Configuration Drift Detection
+  hosts: oracle_db_servers
+  gather_facts: no
+  tasks:
+    - name: Gather current Oracle configuration
+      ansible.builtin.shell:
+        cmd: "sqlplus -S / as sysdba @/home/oracle/show_parameters.sql"
+      register: oracle_config
+
+    - name: Save current configuration to file
+      ansible.builtin.copy:
+        content: "{{ oracle_config.stdout }}"
+        dest: "/tmp/current_oracle_config.txt"
+
+    - name: Compare with baseline
+      ansible.builtin.command:
+        cmd: "diff /tmp/current_oracle_config.txt /etc/ansible/baselines/oracle_baseline.txt"
+      register: oracle_diff
+      ignore_errors: yes
+
+    - name: Report configuration drift
+      ansible.builtin.debug:
+        msg: "{{ oracle_diff.stdout_lines }}"
+      when: oracle_diff.rc != 0

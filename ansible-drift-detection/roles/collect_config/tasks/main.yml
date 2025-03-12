@@ -1,0 +1,9 @@
+- name: Collect PostgreSQL configuration
+  ansible.builtin.shell: "psql -U postgres -c 'SHOW ALL;'"
+  when: "'postgres' in group_names"
+  register: postgres_config
+
+- name: Collect Oracle configuration
+  ansible.builtin.shell: "sqlplus -S / as sysdba @/home/oracle/show_parameters.sql"
+  when: "'oracle_db_servers' in group_names"
+  register: oracle_config

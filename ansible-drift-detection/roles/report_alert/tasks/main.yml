@@ -1,0 +1,33 @@
+- name: Generate HTML report
+  copy:
+    dest: "/var/log/ansible/drift_report.html"
+    content: |
+      <!DOCTYPE html>
+      <html>
+      <head>
+          <title>Configuration Drift Report</title>
+      </head>
+      <body>
+          <h2>PostgreSQL Drift:</h2>
+          <pre>{{ postgres_diff.stdout if postgres_diff is defined else 'No Drift Detected' }}</pre>
+          <h2>Oracle Drift:</h2>
+          <pre>{{ oracle_diff.stdout if oracle_diff is defined else 'No Drift Detected' }}</pre>
+      </body>
+      </html>
+
+- name: Save Drift Report
+  ansible.builtin.copy:
+    content: "{{ drift_output }}"
+    dest: "/var/log/ansible/drift_reports/{{ inventory_hostname }}_drift_{{ ansible_date_time.iso8601 }}.txt"
+
+- name: Send Email Alert
+  ansible.builtin.mail:
+    host: "smtp.example.com"
+    port: 587
+    username: "your-email@example.com"
+    password: "your-password"
+    to: "admin@example.com"
+    subject: "Configuration Drift Detected on {{ inventory_hostname }}"
+    body: "{{ drift_output }}"
+    secure: starttls
+    delegate_to: localhost

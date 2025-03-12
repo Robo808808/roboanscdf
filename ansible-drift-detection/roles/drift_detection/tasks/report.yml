@@ -1,0 +1,10 @@
+# roles/drift_detection/tasks/report.yml
+- name: Generate HTML Report
+  ansible.builtin.template:
+    src: "report_template.html.j2"
+    dest: "/var/log/ansible/drift_reports/drift_report_{{ ansible_date_time.iso8601 }}.html"
+
+- name: Generate JSON Report
+  ansible.builtin.template:
+    src: "report_template.json.j2"
+    dest: "/var/log/ansible/drift_reports/drift_report_{{ ansible_date_time.iso8601 }}.json"

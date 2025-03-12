@@ -1,0 +1,11 @@
+- name: Check PostgreSQL configuration
+  hosts: db_servers
+  tasks:
+    - name: Gather PostgreSQL configuration
+      ansible.builtin.shell: "cat /etc/postgresql/14/main/postgresql.conf"
+      register: postgres_conf
+
+    - name: Compare configuration
+      ansible.builtin.debug:
+        msg: "PostgreSQL configuration drift detected: {{ postgres_conf.stdout_lines }}"
+      when: "'max_connections = 100' not in postgres_conf.stdout_lines"

@@ -1,0 +1,23 @@
+- name: Save PostgreSQL config to file
+  copy:
+    content: "{{ postgres_config.stdout }}"
+    dest: "/tmp/current_postgres_config.txt"
+  when: postgres_config is defined
+
+- name: Save Oracle config to file
+  copy:
+    content: "{{ oracle_config.stdout }}"
+    dest: "/tmp/current_oracle_config.txt"
+  when: oracle_config is defined
+
+- name: Compare PostgreSQL configuration with baseline
+  command: "diff /tmp/current_postgres_config.txt {{ playbook_dir }}/baselines/postgres_baseline.txt"
+  register: postgres_diff
+  ignore_errors: yes
+  when: postgres_config is defined
+
+- name: Compare Oracle configuration with baseline
+  command: "diff /tmp/current_oracle_config.txt {{ playbook_dir }}/baselines/oracle_baseline.txt"
+  register: oracle_diff
+  ignore_errors: yes
+  when: oracle_config is defined

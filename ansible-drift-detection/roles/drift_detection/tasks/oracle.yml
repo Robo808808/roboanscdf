@@ -1,0 +1,11 @@
+- name: Check Oracle Database Configuration
+  hosts: oracle_db_servers
+  tasks:
+    - name: Gather Oracle configuration
+      ansible.builtin.shell: "sqlplus -S / as sysdba @/home/oracle/show_parameters.sql"
+      register: oracle_conf
+
+    - name: Compare configuration
+      ansible.builtin.debug:
+        msg: "Oracle configuration drift detected: {{ oracle_conf.stdout_lines }}"
+      when: "'processes=300' not in oracle_conf.stdout_lines"

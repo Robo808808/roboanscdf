@@ -1,0 +1,9 @@
+# roles/drift_detection/templates/report_template.html.j2
+<html>
+<head><title>Configuration Drift Report</title></head>
+<body>
+    <h1>Configuration Drift Report</h1>
+    <p>Generated on: {{ ansible_date_time.iso8601 }}</p>
+    <pre>{{ drift_output }}</pre>
+</body>
+</html>

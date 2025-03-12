@@ -1,0 +1,24 @@
+- name: PostgreSQL Configuration Drift Detection
+  hosts: postgres_servers
+  gather_facts: no
+  tasks:
+    - name: Gather current PostgreSQL configuration
+      ansible.builtin.command:
+        cmd: "psql -U postgres -c 'SHOW ALL;'"
+      register: postgres_config
+
+    - name: Save current configuration to file
+      ansible.builtin.copy:
+        content: "{{ postgres_config.stdout }}"
+        dest: "/tmp/current_postgres_config.txt"
+
+    - name: Compare with baseline
+      ansible.builtin.command:
+        cmd: "diff /tmp/current_postgres_config.txt /etc/ansible/baselines/postgres_baseline.txt"
+      register: postgres_diff
+      ignore_errors: yes
+
+    - name: Report configuration drift
+      ansible.builtin.debug:
+        msg: "{{ postgres_diff.stdout_lines }}"
+      when: postgres_diff.rc != 0

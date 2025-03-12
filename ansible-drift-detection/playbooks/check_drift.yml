@@ -1,0 +1,7 @@
+- name: Unified Configuration Drift Detection
+  hosts: all
+  gather_facts: no
+  roles:
+    - collect_config
+    - compare_config
+    - report_alert

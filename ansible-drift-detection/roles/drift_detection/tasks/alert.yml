@@ -1,0 +1,28 @@
+# roles/drift_detection/tasks/alert.yml
+- name: Send Slack Notification
+  ansible.builtin.uri:
+    url: "{{ notification.slack_webhook }}"
+    method: POST
+    body_format: json
+    body: "{\"text\": \"Configuration Drift Detected: {{ drift_output }}\"}"
+  when: notification.method == "slack"
+
+- name: Send Teams Notification
+  ansible.builtin.uri:
+    url: "{{ notification.teams_webhook }}"
+    method: POST
+    body_format: json
+    body: "{\"text\": \"Configuration Drift Detected: {{ drift_output }}\"}"
+  when: notification.method == "teams"
+
+- name: Send Email Alert
+  ansible.builtin.mail:
+    host: "smtp.example.com"
+    port: 587
+    username: "your-email@example.com"
+    password: "your-password"
+    to: "{{ notification.email_recipients | join(',') }}"
+    subject: "Configuration Drift Detected"
+    body: "{{ drift_output }}"
+    secure: starttls
+  when: notification.method == "email"
