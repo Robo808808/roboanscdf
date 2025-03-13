@@ -1,8 +1,2 @@
-[postgres_servers]
-pg-server-01 ansible_host=192.168.1.10
-
-[oracle_db_servers]
-oracle-server-01 ansible_host=192.168.1.20
-
 # group_vars/all.yml
 teams_webhook_url: "https://example.webhook.office.com/webhookb2/xxxxxx/IncomingWebhook/xxxxxx/xxxxxx"

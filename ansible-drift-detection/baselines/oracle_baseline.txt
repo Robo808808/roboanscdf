@@ -1,0 +1,13 @@
+Initialization Parameters:
+processes=300
+sessions=400
+
+Listener Status:
+STATUS of the LISTENER
+
+Tablespace Configuration:
+USERS /u01/oracle/oradata/USERS01.dbf 1000
+
+User Profiles & Permissions:
+USER_NAME1 DEFAULT
+USER_NAME2 LIMITED

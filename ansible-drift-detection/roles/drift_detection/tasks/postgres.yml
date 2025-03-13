@@ -1,11 +1,40 @@
-- name: Check PostgreSQL configuration
-  hosts: db_servers
-  tasks:
-    - name: Gather PostgreSQL configuration
-      ansible.builtin.shell: "cat /etc/postgresql/14/main/postgresql.conf"
-      register: postgres_conf
+- name: Collect PostgreSQL Configuration Settings
+  ansible.builtin.command:
+    cmd: "psql -U postgres -c 'SHOW ALL;'"
+  register: postgres_settings
+  changed_when: false
 
-    - name: Compare configuration
-      ansible.builtin.debug:
-        msg: "PostgreSQL configuration drift detected: {{ postgres_conf.stdout_lines }}"
-      when: "'max_connections = 100' not in postgres_conf.stdout_lines"
+- name: Collect PostgreSQL User Roles
+  ansible.builtin.command:
+    cmd: "psql -U postgres -c '\\du'"
+  register: postgres_user_roles
+  changed_when: false
+
+- name: Collect PostgreSQL Active Extensions
+  ansible.builtin.command:
+    cmd: "psql -U postgres -c '\\dx'"
+  register: postgres_extensions
+  changed_when: false
+
+- name: Collect PostgreSQL Database Configurations
+  ansible.builtin.command:
+    cmd: "psql -U postgres -c '\\l+'"
+  register: postgres_db_config
+  changed_when: false
+
+- name: Save PostgreSQL configuration to file
+  ansible.builtin.copy:
+    content: |
+      Configuration Settings:
+      {{ postgres_settings.stdout }}
+
+      User Roles:
+      {{ postgres_user_roles.stdout }}
+
+      Active Extensions:
+      {{ postgres_extensions.stdout }}
+
+      Database Configurations:
+      {{ postgres_db_config.stdout }}
+    dest: "/tmp/current_postgres_config.txt"
+

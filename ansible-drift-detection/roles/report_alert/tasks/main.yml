@@ -31,3 +31,74 @@
     body: "{{ drift_output }}"
     secure: starttls
     delegate_to: localhost
+
+- name: Send Drift Alert to Microsoft Teams
+  ansible.builtin.uri:
+    url: "{{ teams_webhook_url }}"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      text: |
+        Drift detected on {{ inventory_hostname }}:
+        - PostgreSQL Drift: {{ postgres_diff.stdout if postgres_diff is defined else 'No Drift Detected' }}
+        - Oracle Drift: {{ oracle_diff.stdout if oracle_diff is defined else 'No Drift Detected' }}
+  when: postgres_diff.rc != 0 or oracle_diff.rc != 0
+
+- name: Send Drift Alert to Microsoft Teams using Adaptive Cards
+  ansible.builtin.uri:
+    url: "{{ teams_webhook_url }}"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      type: "message"
+      attachments:
+        - contentType: "application/vnd.microsoft.card.adaptive"
+          content:
+            type: "AdaptiveCard"
+            version: "1.4"
+            body:
+              - type: "TextBlock"
+                text: "⚠️ Configuration Drift Detected!"
+                weight: "Bolder"
+                size: "Medium"
+                color: "Attention"
+              - type: "TextBlock"
+                text: "Server: {{ inventory_hostname }}"
+                weight: "Bolder"
+                spacing: "Small"
+              - type: "TextBlock"
+                text: "PostgreSQL Drift:"
+                weight: "Bolder"
+                spacing: "Small"
+              - type: "TextBlock"
+                text: "{{ postgres_diff.stdout if postgres_diff is defined else 'No Drift Detected' }}"
+                wrap: true
+              - type: "TextBlock"
+                text: "Oracle Drift:"
+                weight: "Bolder"
+                spacing: "Small"
+              - type: "TextBlock"
+                text: "{{ oracle_diff.stdout if oracle_diff is defined else 'No Drift Detected' }}"
+                wrap: true
+            actions:
+              - type: "Action.OpenUrl"
+                title: "View Full Report"
+                url: "http://your-report-url/report.html"
+  when: postgres_diff.rc != 0 or oracle_diff.rc != 0
+
+- name: Send Drift Alert to Microsoft Teams (via Workflows App)
+  ansible.builtin.uri:
+    url: "{{ power_automate_webhook_url }}"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      inventory_hostname: "{{ inventory_hostname }}"
+      postgres_diff: "{{ postgres_diff.stdout if postgres_diff is defined else 'No Drift Detected' }}"
+      oracle_diff: "{{ oracle_diff.stdout if oracle_diff is defined else 'No Drift Detected' }}"
+  when: postgres_diff.rc != 0 or oracle_diff.rc != 0

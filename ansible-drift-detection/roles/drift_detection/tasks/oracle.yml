@@ -1,11 +1,46 @@
-- name: Check Oracle Database Configuration
-  hosts: oracle_db_servers
-  tasks:
-    - name: Gather Oracle configuration
-      ansible.builtin.shell: "sqlplus -S / as sysdba @/home/oracle/show_parameters.sql"
-      register: oracle_conf
+- name: Collect Oracle Database Initialization Parameters
+  ansible.builtin.shell: "sqlplus -S / as sysdba @/home/oracle/show_parameters.sql"
+  register: oracle_init_params
+  changed_when: false
 
-    - name: Compare configuration
-      ansible.builtin.debug:
-        msg: "Oracle configuration drift detected: {{ oracle_conf.stdout_lines }}"
-      when: "'processes=300' not in oracle_conf.stdout_lines"
+- name: Collect Oracle Listener Status
+  ansible.builtin.shell: "lsnrctl status"
+  register: oracle_listener_status
+  changed_when: false
+
+- name: Collect Oracle Tablespace Configuration
+  ansible.builtin.shell: |
+    sqlplus -S / as sysdba <<EOF
+    set linesize 200
+    set pagesize 200
+    SELECT tablespace_name, file_name, bytes/1024/1024 AS size_mb
+    FROM dba_data_files;
+    EOF
+  register: oracle_tablespace_config
+  changed_when: false
+
+- name: Collect Oracle User Profiles & Permissions
+  ansible.builtin.shell: |
+    sqlplus -S / as sysdba <<EOF
+    set linesize 200
+    set pagesize 200
+    SELECT username, profile FROM dba_users;
+    EOF
+  register: oracle_user_profiles
+  changed_when: false
+
+- name: Save Oracle configuration to file
+  ansible.builtin.copy:
+    content: |
+      Initialization Parameters:
+      {{ oracle_init_params.stdout }}
+
+      Listener Status:
+      {{ oracle_listener_status.stdout }}
+
+      Tablespace Configuration:
+      {{ oracle_tablespace_config.stdout }}
+
+      User Profiles & Permissions:
+      {{ oracle_user_profiles.stdout }}
+    dest: "/tmp/current_oracle_config.txt"

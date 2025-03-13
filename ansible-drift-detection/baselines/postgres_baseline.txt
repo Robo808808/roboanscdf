@@ -1,0 +1,12 @@
+Configuration Settings:
+max_connections=100
+shared_buffers=4GB
+
+User Roles:
+postgres Superuser
+
+Active Extensions:
+plpgsql
+
+Database Configurations:
+postgres UTF8
