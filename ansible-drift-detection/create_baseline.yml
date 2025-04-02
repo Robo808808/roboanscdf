@@ -1,0 +1,9 @@
+- name: Set Initial DBSAT Baseline
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Copy new DBSAT report as baseline
+      ansible.builtin.copy:
+        src: "./dbsat_results/dbsat_output.json"
+        dest: "./dbsat_results/dbsat_baseline.json"
+        remote_src: no

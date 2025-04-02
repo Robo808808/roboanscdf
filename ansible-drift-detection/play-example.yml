@@ -1,0 +1,58 @@
+- name: Run Oracle DBSAT and Detect Configuration Drift
+  hosts: db_servers
+  gather_facts: no
+  vars:
+    db_user: "system"
+    db_host: "your-hostname"
+    db_port: "1521"
+    db_service: "your-service"
+    db_password: !vault |
+        $ANSIBLE_VAULT;1.1;AES256
+        your-encrypted-password
+    dbsat_home: "/opt/oracle/dbsat"
+    dbsat_output: "/tmp/dbsat_output"
+    local_report_dir: "./dbsat_results/"
+    baseline_report: "./dbsat_results/dbsat_baseline.json"
+
+  tasks:
+    - name: Run DBSAT collect
+      ansible.builtin.shell: |
+        echo "{{ db_password }}" | {{ dbsat_home }}/dbsat collect -n {{ dbsat_output }} {{ db_user }}@"{{ db_host }}:{{ db_port }}/{{ db_service }}"
+      become: yes
+      become_user: oracle
+      register: dbsat_collect_result
+      changed_when: false
+
+    - name: Run DBSAT report (Generate JSON)
+      ansible.builtin.shell: "{{ dbsat_home }}/dbsat report -a {{ dbsat_output }}"
+      become: yes
+      become_user: oracle
+      register: dbsat_report_result
+      changed_when: false
+
+    - name: Fetch DBSAT JSON report
+      ansible.builtin.fetch:
+        src: "{{ dbsat_output }}.json"
+        dest: "{{ local_report_dir }}"
+        flat: yes
+
+- name: Compare DBSAT JSON Reports for Configuration Drift
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Run Python Drift Detection Script
+      ansible.builtin.command: "python3 compare_dbsat.py {{ baseline_report }} {{ local_report_dir }}/dbsat_output.json"
+      register: drift_result
+      changed_when: false
+
+    - name: Show Drift Detection Results
+      ansible.builtin.debug:
+        msg: "{{ drift_result.stdout }}"
+
+    - name: Send Drift Report to Slack (if drift detected)
+      community.general.slack:
+        token: "your-slack-token"
+        channel: "#security-alerts"
+        msg: "DBSAT Configuration Drift Detected:\n{{ drift_result.stdout }}"
+        color: "#FF0000"
+      when: drift_result.stdout != "No Drift Detected"
