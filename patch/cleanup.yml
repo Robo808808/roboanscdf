@@ -1,5 +1,5 @@
 ---
-- name: Cleanup Old ORACLE_HOME Directories
+- name: Cleanup Old ORACLE_HOME Directories using Oracle Deinstall
   hosts: db_servers
   gather_facts: yes
   tasks:
@@ -34,19 +34,27 @@
       changed_when: false
       ignore_errors: true
 
-    - name: Filter ORACLE_HOMEs that are still in use
+    - name: Filter ORACLE_HOMEs that are safe to deinstall
       ansible.builtin.set_fact:
-        safe_to_delete: "{{ old_oracle_homes | zip(home_usage.results) | rejectattr('1.stdout', 'ne', '0') | map(attribute='0') | list }}"
+        safe_to_deinstall: "{{ old_oracle_homes | zip(home_usage.results) | rejectattr('1.stdout', 'ne', '0') | map(attribute='0') | list }}"
 
-    - name: Remove old ORACLE_HOME directories
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop: "{{ safe_to_delete }}"
-      when: safe_to_delete | length > 0
+    - name: Run Oracle deinstall script in silent mode
+      ansible.builtin.command:
+        cmd: "{{ item }}/deinstall/deinstall -silent -checkonly"
+      loop: "{{ safe_to_deinstall }}"
+      register: deinstall_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Execute deinstall for old ORACLE_HOME
+      ansible.builtin.command:
+        cmd: "{{ item }}/deinstall/deinstall -silent"
+      loop: "{{ safe_to_deinstall }}"
+      when: deinstall_check is succeeded
       notify: Cleanup complete
 
   handlers:
     - name: Cleanup complete
       ansible.builtin.debug:
-        msg: "Old ORACLE_HOME directories have been removed successfully."
+        msg: "Old ORACLE_HOME directories have been successfully deinstalled."
+
