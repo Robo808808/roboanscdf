@@ -1,0 +1,54 @@
+- name: Determine ORACLE_HOME, ORACLE_BASE, and Check Filesystem Space
+  hosts: db_servers
+  gather_facts: yes
+  vars:
+    oracle_sid: "ORCL"  # Change as needed
+    min_required_space_mb: 5000  # Minimum required space in MB for new installation
+
+  tasks:
+    - name: Extract ORACLE_HOME from /etc/oratab
+      ansible.builtin.shell: "grep '^{{ oracle_sid }}:' /etc/oratab | cut -d':' -f2"
+      register: oracle_home_result
+      changed_when: false
+
+    - name: Set ORACLE_HOME fact
+      ansible.builtin.set_fact:
+        oracle_home: "{{ oracle_home_result.stdout | trim }}"
+
+    - name: Debug - Show ORACLE_HOME
+      ansible.builtin.debug:
+        msg: "ORACLE_HOME for SID {{ oracle_sid }} is set to {{ oracle_home }}"
+
+    - name: Extract ORACLE_BASE from ORACLE_HOME
+      ansible.builtin.set_fact:
+        oracle_base: "{{ oracle_home | regex_replace('/product/.*$', '') }}"
+
+    - name: Debug - Show ORACLE_BASE
+      ansible.builtin.debug:
+        msg: "ORACLE_BASE is determined as {{ oracle_base }}"
+
+    - name: Check available space in ORACLE_BASE filesystem
+      ansible.builtin.command: "df -m {{ oracle_base }} | tail -1 | awk '{print $4}'"
+      register: fs_space
+      changed_when: false
+
+    - name: Convert available space to integer
+      ansible.builtin.set_fact:
+        available_space_mb: "{{ fs_space.stdout | int }}"
+
+    - name: Debug - Show available space
+      ansible.builtin.debug:
+        msg: "Available space in {{ oracle_base }}: {{ available_space_mb }} MB"
+
+    - name: Fail if there is not enough space
+      ansible.builtin.fail:
+        msg: "Not enough space in {{ oracle_base }}! Required: {{ min_required_space_mb }} MB, Available: {{ available_space_mb }} MB"
+      when: available_space_mb < min_required_space_mb
+
+    - name: Define new ORACLE_HOME for upcoming installation
+      ansible.builtin.set_fact:
+        new_oracle_home: "{{ oracle_base }}/product/23c/dbhome_1"  # Change version as needed
+
+    - name: Debug - Show new ORACLE_HOME path
+      ansible.builtin.debug:
+        msg: "New ORACLE_HOME for installation will be: {{ new_oracle_home }}"

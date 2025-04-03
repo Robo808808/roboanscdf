@@ -1,0 +1,38 @@
+- name: Set ORACLE_HOME from /etc/oratab and Check Filesystem Space
+  hosts: db_servers
+  gather_facts: yes
+  vars:
+    oracle_sid: "ORCL"  # Change this as needed
+    min_required_space_mb: 5000  # Minimum required space in MB
+
+  tasks:
+    - name: Extract ORACLE_HOME from /etc/oratab
+      ansible.builtin.shell: "grep '^{{ oracle_sid }}:' /etc/oratab | cut -d':' -f2"
+      register: oracle_home_result
+      changed_when: false
+
+    - name: Set ORACLE_HOME fact
+      ansible.builtin.set_fact:
+        oracle_home: "{{ oracle_home_result.stdout | trim }}"
+
+    - name: Debug - Show ORACLE_HOME
+      ansible.builtin.debug:
+        msg: "ORACLE_HOME for SID {{ oracle_sid }} is set to {{ oracle_home }}"
+
+    - name: Check available space in ORACLE_HOME filesystem
+      ansible.builtin.command: "df -m {{ oracle_home }} | tail -1 | awk '{print $4}'"
+      register: fs_space
+      changed_when: false
+
+    - name: Convert available space to integer
+      ansible.builtin.set_fact:
+        available_space_mb: "{{ fs_space.stdout | int }}"
+
+    - name: Debug - Show available space
+      ansible.builtin.debug:
+        msg: "Available space in {{ oracle_home }}: {{ available_space_mb }} MB"
+
+    - name: Fail if there is not enough space
+      ansible.builtin.fail:
+        msg: "Not enough space in {{ oracle_home }}! Required: {{ min_required_space_mb }} MB, Available: {{ available_space_mb }} MB"
+      when: available_space_mb < min_required_space_mb

@@ -1,0 +1,52 @@
+---
+- name: Cleanup Old ORACLE_HOME Directories
+  hosts: db_servers
+  gather_facts: yes
+  tasks:
+    - name: Get all ORACLE_HOME paths from /etc/oratab
+      ansible.builtin.shell: "awk -F: '{print $2}' /etc/oratab | sort -u"
+      register: oratab_homes
+      changed_when: false
+
+    - name: Find all existing ORACLE_HOME directories
+      ansible.builtin.find:
+        paths: "/u01/app/oracle/product"
+        file_type: directory
+        patterns: "dbhome_*"
+      register: existing_homes
+
+    - name: Set list of active ORACLE_HOMEs
+      ansible.builtin.set_fact:
+        active_oracle_homes: "{{ oratab_homes.stdout_lines | list }}"
+
+    - name: Identify old ORACLE_HOMEs not listed in /etc/oratab
+      ansible.builtin.set_fact:
+        old_oracle_homes: "{{ existing_homes.files | map(attribute='path') | difference(active_oracle_homes) }}"
+
+    - name: Debug - Show old ORACLE_HOMEs to be removed
+      ansible.builtin.debug:
+        msg: "Old ORACLE_HOMEs to be removed: {{ old_oracle_homes }}"
+
+    - name: Check if any process is using old ORACLE_HOME directories
+      ansible.builtin.shell: "lsof +D {{ item }} | wc -l"
+      loop: "{{ old_oracle_homes }}"
+      register: home_usage
+      changed_when: false
+      ignore_errors: true
+
+    - name: Filter ORACLE_HOMEs that are still in use
+      ansible.builtin.set_fact:
+        safe_to_delete: "{{ old_oracle_homes | zip(home_usage.results) | rejectattr('1.stdout', 'ne', '0') | map(attribute='0') | list }}"
+
+    - name: Remove old ORACLE_HOME directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ safe_to_delete }}"
+      when: safe_to_delete | length > 0
+      notify: Cleanup complete
+
+  handlers:
+    - name: Cleanup complete
+      ansible.builtin.debug:
+        msg: "Old ORACLE_HOME directories have been removed successfully."

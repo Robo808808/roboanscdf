@@ -1,0 +1,102 @@
+- name: Oracle Installation and Upgrade Check
+  hosts: db_servers
+  gather_facts: yes
+  vars:
+    oracle_sid: "ORCL"  # Change as needed
+    min_required_space_mb: 5000
+    oracle_version: "23c"  # Change version as needed
+
+  tasks:
+    - name: Pre-checks for new Oracle installations
+      block:
+        - name: Check if Oracle groups exist
+          ansible.builtin.command: "getent group dba"
+          register: dba_group
+          failed_when: dba_group.rc != 0
+          changed_when: false
+
+        - name: Verify kernel parameters
+          ansible.builtin.shell: "sysctl -n fs.file-max"
+          register: fs_file_max
+          changed_when: false
+
+        - name: Debug - Show kernel file max
+          ansible.builtin.debug:
+            msg: "fs.file-max value: {{ fs_file_max.stdout }}"
+
+      when: "'oratab' not in ansible_facts['cmdline']"  # Condition for new installation
+
+    - name: Detect existing ORACLE_HOME from /etc/oratab
+      block:
+        - name: Extract ORACLE_HOME from /etc/oratab
+          ansible.builtin.shell: "grep '^{{ oracle_sid }}:' /etc/oratab | cut -d':' -f2"
+          register: oracle_home_result
+          changed_when: false
+          ignore_errors: true  # If it's a new installation, no existing ORACLE_HOME
+
+        - name: Set ORACLE_HOME fact if detected
+          ansible.builtin.set_fact:
+            oracle_home: "{{ oracle_home_result.stdout | trim }}"
+          when: oracle_home_result.stdout != ""
+
+        - name: Extract ORACLE_BASE from ORACLE_HOME
+          ansible.builtin.set_fact:
+            oracle_base: "{{ oracle_home | regex_replace('/product/.*$', '') }}"
+          when: oracle_home is defined
+
+        - name: Debug - Show ORACLE_BASE
+          ansible.builtin.debug:
+            msg: "Existing ORACLE_BASE: {{ oracle_base }}"
+          when: oracle_home is defined
+
+      when: oracle_home_result.stdout != ""
+
+    - name: Prepare for new ORACLE_HOME installation
+      block:
+        - name: Determine new ORACLE_HOME path
+          ansible.builtin.set_fact:
+            new_oracle_home: "{{ oracle_base }}/product/{{ oracle_version }}/dbhome_1"
+          when: oracle_base is defined
+
+        - name: Debug - Show new ORACLE_HOME path
+          ansible.builtin.debug:
+            msg: "New ORACLE_HOME will be installed at: {{ new_oracle_home }}"
+
+        - name: Check available space in ORACLE_BASE filesystem
+          ansible.builtin.command: "df -m {{ oracle_base }} | tail -1 | awk '{print $4}'"
+          register: fs_space
+          changed_when: false
+
+        - name: Convert available space to integer
+          ansible.builtin.set_fact:
+            available_space_mb: "{{ fs_space.stdout | int }}"
+
+        - name: Fail if there is not enough space
+          ansible.builtin.fail:
+            msg: "Not enough space in {{ oracle_base }}! Required: {{ min_required_space_mb }} MB, Available: {{ available_space_mb }} MB"
+          when: available_space_mb < min_required_space_mb
+
+      when: oracle_base is defined
+
+    - name: Install new ORACLE_HOME
+      block:
+        - name: Create ORACLE_HOME directory
+          ansible.builtin.file:
+            path: "{{ new_oracle_home }}"
+            state: directory
+            owner: oracle
+            group: dba
+            mode: '0755'
+
+        - name: Extract Oracle software
+          ansible.builtin.unarchive:
+            src: "/tmp/oracle_install.zip"
+            dest: "{{ new_oracle_home }}"
+            remote_src: yes
+            owner: oracle
+            group: dba
+
+        - name: Debug - Oracle installation ready
+          ansible.builtin.debug:
+            msg: "New Oracle Home {{ new_oracle_home }} is prepared for installation."
+      when: oracle_base is defined
