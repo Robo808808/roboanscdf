@@ -56,14 +56,22 @@
         ORACLE_HOME: "{{ oracle_home }}"
       changed_when: false
 
-    - name: Extract generated response file path from output
+    - name: Extract lines with .rsp file from checkonly output
       ansible.builtin.set_fact:
-        deinstall_response_file: >-
-          {{ (checkonly_output.stdout_lines | select('search', '\\.rsp$') | list).0 | regex_search('(/[^ ]+\\.rsp)') }}
+        rsp_lines: "{{ checkonly_output.stdout_lines | select('search', '\\.rsp$') | list }}"
+
+    - name: Debug: Show detected .rsp lines (if any)
+      ansible.builtin.debug:
+        var: rsp_lines
+
+    - name: Set fact for response file if found
+      ansible.builtin.set_fact:
+        deinstall_response_file: "{{ rsp_lines[0] | regex_search('(/[^ ]+\\.rsp)', '\\1') }}"
+      when: rsp_lines | length > 0
 
     - name: Fail if response file could not be detected
       ansible.builtin.fail:
-        msg: "Could not find response file in checkonly output."
+        msg: "Could not find response file in checkonly output: {{ checkonly_output.stdout_lines }}"
       when: deinstall_response_file is not defined or deinstall_response_file == ""
 
     - name: Run Oracle deinstall using generated response file
