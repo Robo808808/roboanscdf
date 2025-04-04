@@ -56,19 +56,25 @@
         ORACLE_HOME: "{{ oracle_home }}"
       changed_when: false
 
-    - name: Extract response file path using regex_findall
+    - name: Extract response file path using a more precise regex pattern
       ansible.builtin.set_fact:
         rsp_file_matches: >-
-          {{ checkonly_output.stdout_lines | map('regex_findall', "generated: ''([^']+\\.rsp)''") | list | flatten }}
+          {{ checkonly_output.stdout_lines | map('regex_findall', "generated: '(.*?\\.rsp)'") | list | flatten }}
 
-    - name: Set deinstall_response_file if a match was found
+    - name:
+        Debug: Show all found response file matches
+      ansible.builtin.debug:
+        msg: "Found response files: {{ rsp_file_matches }}"
+
+    - name: Set deinstall_response_file if a match is found
       ansible.builtin.set_fact:
         deinstall_response_file: "{{ rsp_file_matches[0] }}"
       when: rsp_file_matches | length > 0
 
-    - name: Debug response file
+    - name:
+        Debug: Show selected response file
       ansible.builtin.debug:
-        msg: "Response file: {{ deinstall_response_file | default('Not found') }}"
+        msg: "Selected response file: {{ deinstall_response_file }}"
 
     - name: Check if response file exists
       ansible.builtin.stat:
@@ -76,12 +82,10 @@
       register: rsp_file_check
       when: deinstall_response_file is defined
 
-    - name: Fail if response file not found
+    - name: Fail if response file is not found
       ansible.builtin.fail:
         msg: "Response file was not found: {{ deinstall_response_file }}"
-      when:
-        - deinstall_response_file is not defined
-        - rsp_file_check.stat.exists is not defined or not rsp_file_check.stat.exists
+      when: deinstall_response_file is not defined or not rsp_file_check.stat.exists
 
     - name: Run Oracle deinstall using generated response file
       ansible.builtin.shell: >
