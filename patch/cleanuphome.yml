@@ -56,13 +56,16 @@
         ORACLE_HOME: "{{ oracle_home }}"
       changed_when: false
 
+    - name: Debug Show the full output
+      ansible.builtin.debug:
+        var: checkonly_output.stdout_lines
+
     - name: Extract response file path using a more precise regex pattern
       ansible.builtin.set_fact:
         rsp_file_matches: >-
           {{ checkonly_output.stdout_lines | map('regex_findall', "generated: '(.*?\\.rsp)'") | list | flatten }}
 
-    - name:
-        Debug: Show all found response file matches
+    - name: Debug Show all found response file matches
       ansible.builtin.debug:
         msg: "Found response files: {{ rsp_file_matches }}"
 
