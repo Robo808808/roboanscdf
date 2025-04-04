@@ -59,16 +59,16 @@
     - name: Extract line with response file path
       ansible.builtin.set_fact:
         rsp_line: >-
-          {{ (checkonly_output.stdout_lines | select('search', 'Location of response file generated') | list).0 | default('') }}
+          {{ (checkonly_output.stdout_lines | select('search', 'Location of response file generated') | list | first | default('')) }}
 
-    - name: Clean up and extract path from response line
+    - name: Parse response file path if rsp_line is not empty
       ansible.builtin.set_fact:
         deinstall_response_file: >-
-          {{ rsp_line | regex_search("generated: ''(.*?)''", '\\1') | default('') }}
-
-    - name: Debug - show response file path
-      ansible.builtin.debug:
-        msg: "Detected response file: {{ deinstall_response_file }}"
+          {% if rsp_line | length > 0 and "generated:" in rsp_line %}
+            {{ rsp_line.split("generated: ''")[1].split("''")[0] }}
+          {% else %}
+            ''
+          {% endif %}
 
     - name: Check if response file exists on the filesystem
       ansible.builtin.stat:
