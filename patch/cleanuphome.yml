@@ -1,5 +1,5 @@
 ---
-- name: Deinstall Oracle Home if unused
+- name: Deinstall Oracle Home if unused and safe
   hosts: db_servers
   become: yes
   vars:
@@ -46,10 +46,29 @@
         msg: "Deinstall script not found at {{ oracle_home }}/deinstall/deinstall"
       when: not deinstall_script.stat.exists
 
-    - name: Run Oracle deinstall silently
+    - name: Run checkonly to generate response file
       ansible.builtin.shell: |
-        "{{ oracle_home }}/deinstall/deinstall" -silent -checkonly || true
-        "{{ oracle_home }}/deinstall/deinstall" -silent || true
+        "{{ oracle_home }}/deinstall/deinstall" -silent -checkonly
+      args:
+        chdir: "{{ oracle_home }}/deinstall"
+      register: checkonly_output
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+      changed_when: false
+
+    - name: Extract generated response file path from output
+      ansible.builtin.set_fact:
+        deinstall_response_file: >-
+          {{ (checkonly_output.stdout_lines | select('search', '\\.rsp$') | list).0 | regex_search('(/[^ ]+\\.rsp)') }}
+
+    - name: Fail if response file could not be detected
+      ansible.builtin.fail:
+        msg: "Could not find response file in checkonly output."
+      when: deinstall_response_file is not defined or deinstall_response_file == ""
+
+    - name: Run Oracle deinstall using generated response file
+      ansible.builtin.shell: >
+        "{{ oracle_home }}/deinstall/deinstall" -silent -paramfile "{{ deinstall_response_file }}"
       args:
         chdir: "{{ oracle_home }}/deinstall"
       register: deinstall_output
