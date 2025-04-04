@@ -56,21 +56,33 @@
         ORACLE_HOME: "{{ oracle_home }}"
       changed_when: false
 
-    - name: Extract response file path from checkonly output
+    - name: Extract line with response file path
       ansible.builtin.set_fact:
-        deinstall_response_file: >-
-          {{ (checkonly_output.stdout_lines | select('search', 'Location of response file generated') | list).0
-             | regex_search("''([^']+\\.rsp)''", '\\1') }}
-      when: checkonly_output.stdout_lines | select('search', 'Location of response file generated') | list | length > 0
+        rsp_line: >-
+          {{ (checkonly_output.stdout_lines | select('search', 'Location of response file generated') | list).0 | default('') }}
 
-    - name: Debug - response file path
+    - name: Extract path from response line (safely)
+      ansible.builtin.set_fact:
+        deinstall_response_file: "{{ rsp_line | regex_search(\"''([^']+\\.rsp)''\", '\\1') | default('') }}"
+
+    - name: Debug - show response file
       ansible.builtin.debug:
         msg: "Detected response file: {{ deinstall_response_file }}"
 
     - name: Fail if response file could not be detected
       ansible.builtin.fail:
         msg: "Could not find response file in checkonly output"
-      when: deinstall_response_file is not defined or deinstall_response_file == ""
+      when: deinstall_response_file == ""
+
+    - name: Check if response file exists on the filesystem
+      ansible.builtin.stat:
+        path: "{{ deinstall_response_file }}"
+      register: rsp_file_check
+
+    - name: Fail if response file is not found
+      ansible.builtin.fail:
+        msg: "Response file '{{ deinstall_response_file }}' was not found on the filesystem."
+      when: not rsp_file_check.stat.exists
 
     - name: Run Oracle deinstall using generated response file
       ansible.builtin.shell: >
