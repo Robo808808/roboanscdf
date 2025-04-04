@@ -1,0 +1,62 @@
+---
+- name: Deinstall Oracle Home if unused
+  hosts: db_servers
+  become: yes
+  vars:
+    oracle_home: "{{ oracle_home | default('') }}"
+
+  tasks:
+
+    - name: Fail if ORACLE_HOME is not provided
+      ansible.builtin.fail:
+        msg: "ORACLE_HOME is not set. Use -e 'oracle_home=/path/to/home'"
+      when: oracle_home == ""
+
+    - name: Check for running processes using ORACLE_HOME
+      ansible.builtin.shell: "ps -ef | grep -v grep | grep '{{ oracle_home }}'"
+      register: home_process_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Fail if running processes are found using ORACLE_HOME
+      ansible.builtin.fail:
+        msg: |
+          Oracle processes are still using {{ oracle_home }}:
+          {{ home_process_check.stdout_lines }}
+      when: home_process_check.stdout != ""
+
+    - name: Check if ORACLE_HOME exists in /etc/oratab
+      ansible.builtin.shell: "grep -F '{{ oracle_home }}' /etc/oratab"
+      register: oratab_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Fail if ORACLE_HOME is still referenced in oratab
+      ansible.builtin.fail:
+        msg: "ORACLE_HOME {{ oracle_home }} still appears in /etc/oratab"
+      when: oratab_check.stdout != ""
+
+    - name: Check if deinstall script exists
+      ansible.builtin.stat:
+        path: "{{ oracle_home }}/deinstall/deinstall"
+      register: deinstall_script
+
+    - name: Fail if deinstall script is missing
+      ansible.builtin.fail:
+        msg: "Deinstall script not found at {{ oracle_home }}/deinstall/deinstall"
+      when: not deinstall_script.stat.exists
+
+    - name: Run Oracle deinstall silently
+      ansible.builtin.shell: |
+        "{{ oracle_home }}/deinstall/deinstall" -silent -checkonly || true
+        "{{ oracle_home }}/deinstall/deinstall" -silent || true
+      args:
+        chdir: "{{ oracle_home }}/deinstall"
+      register: deinstall_output
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+      changed_when: "'Successfully deinstalled' in deinstall_output.stdout"
+
+    - name: Print deinstall output
+      ansible.builtin.debug:
+        var: deinstall_output.stdout_lines
