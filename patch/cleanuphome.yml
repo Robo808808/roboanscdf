@@ -56,30 +56,32 @@
         ORACLE_HOME: "{{ oracle_home }}"
       changed_when: false
 
-    - name: Extract line with response file path
+    - name: Extract response file path using regex_findall
       ansible.builtin.set_fact:
-        rsp_line: >-
-          {{ (checkonly_output.stdout_lines | select('search', 'Location of response file generated') | list | first | default('')) }}
+        rsp_file_matches: >-
+          {{ checkonly_output.stdout_lines | map('regex_findall', "generated: ''([^']+\\.rsp)''") | list | flatten }}
 
-    - name: Parse response file path if rsp_line is not empty
+    - name: Set deinstall_response_file if a match was found
       ansible.builtin.set_fact:
-        deinstall_response_file: >-
-          {% if rsp_line | length > 0 and "generated:" in rsp_line %}
-            {{ rsp_line.split("generated: ''")[1].split("''")[0] }}
-          {% else %}
-            ''
-          {% endif %}
+        deinstall_response_file: "{{ rsp_file_matches[0] }}"
+      when: rsp_file_matches | length > 0
 
-    - name: Check if response file exists on the filesystem
+    - name: Debug response file
+      ansible.builtin.debug:
+        msg: "Response file: {{ deinstall_response_file | default('Not found') }}"
+
+    - name: Check if response file exists
       ansible.builtin.stat:
         path: "{{ deinstall_response_file }}"
       register: rsp_file_check
-      when: deinstall_response_file != ""
+      when: deinstall_response_file is defined
 
-    - name: Fail if response file is not found
+    - name: Fail if response file not found
       ansible.builtin.fail:
-        msg: "Response file '{{ deinstall_response_file }}' was not found on the filesystem."
-      when: deinstall_response_file == "" or not rsp_file_check.stat.exists
+        msg: "Response file was not found: {{ deinstall_response_file }}"
+      when:
+        - deinstall_response_file is not defined
+        - rsp_file_check.stat.exists is not defined or not rsp_file_check.stat.exists
 
     - name: Run Oracle deinstall using generated response file
       ansible.builtin.shell: >
