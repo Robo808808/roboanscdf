@@ -111,6 +111,38 @@ echo "$request_info" | mailx -s "[STARTED] Oracle $request_type on $hostname" -r
 post_to_teams "[STARTED] Oracle $request_type on $hostname" \
 "Request Type: **$request_type**<br>Hostname: **$hostname**<br>SID: **$oracle_sid**<br>Log File: \`$logfile\`"
 
+# Power Automate webhook URL
+FLOW_URL="https://prod-123.westeurope.logic.azure.com:443/workflows/your-flow-id/..."
+
+# Prepare card content
+CARD_CONTENT=$(cat <<EOF
+{
+  "@type": "MessageCard",
+  "@context": "http://schema.org/extensions",
+  "summary": "Oracle Automation - $REQUEST_TYPE",
+  "themeColor": "0078D7",
+  "title": "Oracle Automation Job Started",
+  "text": "Request: $REQUEST_TYPE\nSID: $ORACLE_SID\nHost: $HOSTNAME\nLog: $logfile",
+  "attachments": [
+    {
+      "contentType": "application/vnd.microsoft.card.adaptive",
+      "content": {
+        "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.2",
+        "body": [
+          {
+            "type": "TextBlock",
+            "text": "🟢 Job Started\n📛 SID: $ORACLE_SID\n🧩 Type: $REQUEST_TYPE\n📁 Log: $logfile",
+            "wrap": true
+          }
+        ]
+      }
+    }
+  ]
+}
+EOF
+)
 
 # Background playbook runner script
 cat <<EOF > "/tmp/run_ansible_${timestamp}.sh"
@@ -120,17 +152,9 @@ ansible-playbook "$playbook" -i "$hostname," $extra_vars --vault-password-file ~
 # Send COMPLETION email
 echo "$request_info" | mailx -s "[COMPLETED] Oracle $request_type on $hostname" -a "$logfile" -r "$EMAIL_FROM" "$EMAIL_TO"
 
-# Send COMPLETION Teams message
-curl -s -H "Content-Type: application/json" \
-  -d "{
-    \"@type\": \"MessageCard\",
-    \"@context\": \"http://schema.org/extensions\",
-    \"summary\": \"[COMPLETED] Oracle $request_type on $hostname\",
-    \"themeColor\": \"28a745\",
-    \"title\": \"[COMPLETED] Oracle $request_type on $hostname\",
-    \"text\": \"Request completed for **$oracle_sid** on **$hostname**<br>Log File: \`$logfile\`\"
-  }" \
-  "$TEAMS_WEBHOOK_URL" > /dev/null
+# Send Teams notification
+curl -s -X POST -H "Content-Type: application/json" -d "$CARD_CONTENT" "$FLOW_URL"
+
 EOF
 
 chmod +x "/tmp/run_ansible_${timestamp}.sh"
