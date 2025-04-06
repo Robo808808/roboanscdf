@@ -114,15 +114,23 @@ post_to_teams "[STARTED] Oracle $request_type on $hostname" \
 # Power Automate webhook URL
 FLOW_URL="https://prod-123.westeurope.logic.azure.com:443/workflows/your-flow-id/..."
 
-# Prepare card content
-CARD_CONTENT=$(cat <<EOF
+# Background playbook runner script
+cat <<EOF > "/tmp/run_ansible_${timestamp}.sh"
+#!/bin/bash
+ansible-playbook "$playbook" -i "$hostname," $extra_vars --vault-password-file ~/.vault_pass.txt > "$logfile" 2>&1
+
+# Send COMPLETION email
+echo "$request_info" | mailx -s "[COMPLETED] Oracle $request_type on $hostname" -a "$logfile" -r "$EMAIL_FROM" "$EMAIL_TO"
+
+# Send Teams notification
+curl -s -X POST -H "Content-Type: application/json" --data @- "$FLOW_URL" <<EOT
 {
   "@type": "MessageCard",
   "@context": "http://schema.org/extensions",
   "summary": "Oracle Automation - $REQUEST_TYPE",
   "themeColor": "0078D7",
   "title": "Oracle Automation Job Started",
-  "text": "Request: $REQUEST_TYPE\nSID: $ORACLE_SID\nHost: $HOSTNAME\nLog: $logfile",
+  "text": "Request: $REQUEST_TYPE\nSID: $ORACLE_SID\nHost: $HOSTNAME\nLog: $LOGFILE",
   "attachments": [
     {
       "contentType": "application/vnd.microsoft.card.adaptive",
@@ -133,7 +141,7 @@ CARD_CONTENT=$(cat <<EOF
         "body": [
           {
             "type": "TextBlock",
-            "text": "🟢 Job Started\n📛 SID: $ORACLE_SID\n🧩 Type: $REQUEST_TYPE\n📁 Log: $logfile",
+            "text": "🟢 Job Started\n📛 SID: $ORACLE_SID\n🧩 Type: $REQUEST_TYPE\n📁 Log: $LOGFILE",
             "wrap": true
           }
         ]
@@ -141,20 +149,7 @@ CARD_CONTENT=$(cat <<EOF
     }
   ]
 }
-EOF
-)
-
-# Background playbook runner script
-cat <<EOF > "/tmp/run_ansible_${timestamp}.sh"
-#!/bin/bash
-ansible-playbook "$playbook" -i "$hostname," $extra_vars --vault-password-file ~/.vault_pass.txt > "$logfile" 2>&1
-
-# Send COMPLETION email
-echo "$request_info" | mailx -s "[COMPLETED] Oracle $request_type on $hostname" -a "$logfile" -r "$EMAIL_FROM" "$EMAIL_TO"
-
-# Send Teams notification
-curl -s -X POST -H "Content-Type: application/json" -d "$CARD_CONTENT" "$FLOW_URL"
-
+EOT
 EOF
 
 chmod +x "/tmp/run_ansible_${timestamp}.sh"
