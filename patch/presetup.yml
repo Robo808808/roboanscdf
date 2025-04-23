@@ -1,0 +1,21 @@
+---
+- name: Add host to known_hosts
+  hosts: all
+  tasks:
+    - name: Add the host's fingerprint to known_hosts
+      ansible.builtin.known_hosts:
+        name: "{{ inventory_hostname }}"
+        path: "~/.ssh/known_hosts"
+        state: present
+        key: "{{ lookup('pipe', 'ssh-keyscan -H ' + inventory_hostname) }}"
+      become: yes  # Only if you need to execute as root
+
+- name: Add SSH host to known_hosts using ssh-keyscan
+  hosts: all
+  tasks:
+    - name: Add host to known_hosts with ssh-keyscan
+      ansible.builtin.shell: |
+        ssh-keyscan -H {{ inventory_hostname }} >> ~/.ssh/known_hosts
+      args:
+        creates: ~/.ssh/known_hosts  # Avoid adding if the file exists
+      become: yes  # Only if you need to execute as root
