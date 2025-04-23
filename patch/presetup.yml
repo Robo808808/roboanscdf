@@ -86,3 +86,83 @@
         {% else %}
         SQLPlus: Skipped (no credentials provided)
         {% endif %}
+        
+
+---
+# roles/oracle_health_validation/tasks/main.yml
+
+- name: Gather current date
+  ansible.builtin.command: date
+  register: system_date
+
+- name: Check mount points used by Oracle
+  ansible.builtin.command: df -h
+  register: df_output
+
+- name: Check load average
+  ansible.builtin.command: uptime
+  register: uptime_output
+
+- name: Check swap usage
+  ansible.builtin.command: free -m
+  register: mem_output
+
+- name: Check hugepages configuration
+  ansible.builtin.command: cat /proc/meminfo | grep Huge
+  register: hugepages_output
+
+- name: Check for Oracle processes
+  ansible.builtin.shell: ps -ef | grep ora_ | grep -v grep
+  register: ora_processes
+
+- name: Check PMON/SMON/Listener presence
+  ansible.builtin.shell: |
+    ps -ef | grep -E 'pmon|smon|tnslsnr' | grep -v grep
+  register: essential_processes
+
+- name: Validate listener port open
+  ansible.builtin.wait_for:
+    host: localhost
+    port: "{{ listener_port | default(1521) }}"
+    timeout: 3
+  register: listener_port_status
+  ignore_errors: true
+
+- name: Check alert log for ORA-/TNS- errors (last 100 lines)
+  ansible.builtin.shell: |
+    tail -100 {{ oracle_alert_log | default('/u01/app/oracle/diag/rdbms/' + oracle_sid + '/' + oracle_sid + '/trace/alert_' + oracle_sid + '.log') }} | grep -E 'ORA-|TNS-'
+  register: alert_log_errors
+  ignore_errors: true
+
+- name: Optional: Query v$instance if credentials are available
+  ansible.builtin.shell: |
+    echo "select status from v\$instance;" | sqlplus -s {{ oracle_user }}/{{ oracle_pass }}@localhost:{{ listener_port }}/{{ oracle_sid }}
+  register: db_status_check
+  when: oracle_user is defined and oracle_pass is defined
+  ignore_errors: true
+
+- name: Report summary of health check
+  ansible.builtin.debug:
+    msg:
+      - "System Date: {{ system_date.stdout }}"
+      - "Filesystem: {{ df_output.stdout_lines | select('search', '/u01|/u02') | list }}"
+      - "Load Average: {{ uptime_output.stdout }}"
+      - "Swap Info: {{ mem_output.stdout_lines }}"
+      - "HugePages Info: {{ hugepages_output.stdout_lines }}"
+      - "Oracle Processes Running: {{ ora_processes.stdout_lines | length }}"
+      - "Essential Processes: {{ essential_processes.stdout_lines }}"
+      - "Listener Port Open: {{ 'Yes' if listener_port_status.state == 'started' else 'No' }}"
+      - >-
+        {% if alert_log_errors.stdout_lines is defined and alert_log_errors.stdout_lines | length > 0 %}
+        ALERT Log Errors:
+        {{ alert_log_errors.stdout_lines }}
+        {% else %}
+        ALERT Log Errors: None
+        {% endif %}
+      - >-
+        {% if db_status_check is defined %}
+        DB Status: {{ db_status_check.stdout_lines }}
+        {% else %}
+        DB Status: Skipped (no creds provided)
+        {% endif %}
+
