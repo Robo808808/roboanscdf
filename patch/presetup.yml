@@ -19,3 +19,70 @@
       args:
         creates: ~/.ssh/known_hosts  # Avoid adding if the file exists
       become: yes  # Only if you need to execute as root
+
+---
+# roles/oracle_connectivity/tasks/main.yml
+
+- name: Set listener.ora path
+  set_fact:
+    tns_admin: "/u01/app/oracle/product/19.0.0/dbhome_1/network/admin"
+
+- name: Read listener.ora file
+  slurp:
+    src: "{{ tns_admin }}/listener.ora"
+  register: listener_ora_raw
+
+- name: Parse listener.ora
+  set_fact:
+    listener_ora_lines: "{{ listener_ora_raw.content | b64decode | splitlines() }}"
+
+- name: Extract listener name
+  set_fact:
+    listener_name: >-
+      {{ listener_ora_lines | select('match', '^\s*\w+\s*=\s*\(') | map('regex_search', '^\s*(\w+)\s*=') | select('string') | list | first }}
+
+- name: Extract listener port
+  set_fact:
+    listener_port: >-
+      {{ (listener_ora_lines | select('search', 'PORT=\d+') | map('regex_search', 'PORT=(\d+)', '\1') | select('string') | list)[0] | default('1521') }}
+
+- name: Check listener is active
+  shell: |
+    lsnrctl status {{ listener_name }} | grep -i "{{ oracle_sid }}"
+  register: lsnrctl_check
+  ignore_errors: true
+
+- name: Check port is open (TCP check)
+  wait_for:
+    host: "localhost"
+    port: "{{ listener_port | int }}"
+    timeout: 5
+  register: port_status
+
+- name: Run tnsping
+  shell: |
+    tnsping localhost:{{ listener_port }}/{{ oracle_sid }}
+  register: tnsping_check
+  ignore_errors: true
+
+- name: Try sqlplus connection (if creds provided)
+  when: oracle_user is defined and oracle_pass is defined
+  shell: |
+    echo "select 'DB_OK' from dual;" | sqlplus -s {{ oracle_user }}/{{ oracle_pass }}@localhost:{{ listener_port }}/{{ oracle_sid }}
+  register: sqlplus_check
+  ignore_errors: true
+
+- name: Report results
+  debug:
+    msg:
+      - "Listener: {{ listener_name }}"
+      - "Port: {{ listener_port }}"
+      - "Listener Check: {{ 'OK' if lsnrctl_check.rc == 0 else 'FAILED' }}"
+      - "Port Open: {{ port_status.elapsed }}s"
+      - "TNSPing: {{ 'OK' if tnsping_check.rc == 0 else 'FAILED' }}"
+      - >-
+        {% if oracle_user is defined and oracle_pass is defined %}
+        SQLPlus: {{ 'OK' if 'DB_OK' in sqlplus_check.stdout else 'FAILED' }}
+        {% else %}
+        SQLPlus: Skipped (no credentials provided)
+        {% endif %}
