@@ -1,4 +1,40 @@
 ---
+
+- name: Manage Oracle installation
+  hosts: all
+  gather_facts: no  # Turn off until key is trusted
+  vars:
+    ssh_algorithm: ecdsa-sha2-nistp256
+  pre_tasks:
+    - name: Get SSH key from target host
+      shell: ssh-keyscan -T 5 -t {{ ssh_algorithm }} {{ inventory_hostname }}
+      delegate_to: localhost
+      register: ssh_keyscan
+
+    - name: Add combined hostname and IP entry to known_hosts
+      lineinfile:
+        path: ~/.ssh/known_hosts
+        line: "{{ inventory_hostname }},{{ hostvars[inventory_hostname].ansible_host }} {{ ssh_keyscan.stdout_lines[0].split(' ', 1)[1] }}"
+        create: yes
+        state: present
+      delegate_to: localhost
+
+    - name: Remove IP-only entry from known_hosts (if it exists)
+      lineinfile:
+        path: ~/.ssh/known_hosts
+        regexp: "^{{ hostvars[inventory_hostname].ansible_host }} "
+        state: absent
+      delegate_to: localhost
+
+  tasks:
+    - name: Gather facts after known_hosts is handled
+      setup:
+
+    - name: Example task to show connectivity
+      ping:
+
+
+
 - name: Add host to known_hosts
   hosts: all
   tasks:
