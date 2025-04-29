@@ -1,4 +1,13 @@
 ---
+- name: Add combined hostname and IP entry to known_hosts
+  lineinfile:
+    path: ~/.ssh/known_hosts
+    line: "{{ inventory_hostname }},{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }} {{ ssh_keyscan.stdout_lines[0].split(' ', 1)[1] }}"
+    create: yes
+    state: present
+  delegate_to: localhost
+
+
 
 - name: Manage Oracle installation
   hosts: all
