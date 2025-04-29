@@ -20,6 +20,43 @@
         creates: ~/.ssh/known_hosts  # Avoid adding if the file exists
       become: yes  # Only if you need to execute as root
 
+- name: Add FQDN SSH host key to known_hosts with only ecdsa-sha2-nistp256
+  ansible.builtin.known_hosts:
+    name: "{{ inventory_hostname }}"
+    key: "{{ lookup('pipe', 'ssh-keyscan -T 5 -t ecdsa-sha2-nistp256 ' + inventory_hostname) }}"
+    path: "~/.ssh/known_hosts"
+    hash_host: no
+  delegate_to: localhost
+  become: no
+
+- name: Clean up IP-based entries in known_hosts
+  lineinfile:
+    path: "~/.ssh/known_hosts"
+    regexp: '^.*{{ ansible_host }}.*$'
+    state: absent
+  delegate_to: localhost
+  become: no
+  when: ansible_host != inventory_hostname  # Ensure we only remove IP-based entries when necessary
+
+- name: Get the ecdsa key for the host
+  shell: "ssh-keyscan -T 5 -t ecdsa-sha2-nistp256 {{ inventory_hostname }} | grep ecdsa"
+  register: ssh_key
+  delegate_to: localhost
+  changed_when: false
+
+- name: Format the known_hosts line with hostname and IP
+  set_fact:
+    known_host_line: "{{ inventory_hostname }},{{ ansible_host }} {{ ssh_key.stdout.split(' ')[1] }} {{ ssh_key.stdout.split(' ')[2] }}"
+
+- name: Add combined hostname and IP to known_hosts
+  lineinfile:
+    path: "~/.ssh/known_hosts"
+    line: "{{ known_host_line }}"
+    create: yes
+    state: present
+  delegate_to: localhost
+  become: no
+
 ---
 # roles/oracle_connectivity/tasks/main.yml
 
