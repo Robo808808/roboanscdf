@@ -1,0 +1,164 @@
+---
+# Ansible playbook to detect Oracle database service management method
+# Sets facts for service_type (initd or systemd) and service_name
+# If detection fails, it skips remaining tasks gracefully
+
+- name: Detect Oracle Service Management Method
+  hosts: all
+  become: yes
+  vars:
+    oracle_service_name: "{{ oracle_service | default('') }}"
+
+  tasks:
+    # If service name is provided via variable, check if it exists in systemd or initd
+    - name: Check if provided service exists in systemd
+      command: systemctl list-unit-files {{ oracle_service_name }}*
+      register: systemd_service_check
+      ignore_errors: yes
+      when: oracle_service_name != ''
+
+    - name: Check if provided service exists in init.d
+      stat:
+        path: "/etc/init.d/{{ oracle_service_name }}"
+      register: initd_service_check
+      when: oracle_service_name != ''
+
+    - name: Set management type facts for provided service
+      set_fact:
+        oracle_service_type: "systemd"
+        oracle_service_unit: "{{ oracle_service_name }}"
+      when:
+        - oracle_service_name != ''
+        - systemd_service_check.rc == 0
+
+    - name: Set management type facts for provided init.d service
+      set_fact:
+        oracle_service_type: "initd"
+        oracle_service_unit: "{{ oracle_service_name }}"
+      when:
+        - oracle_service_name != ''
+        - initd_service_check.stat.exists
+
+    # Auto-detect if no service name provided or if provided service wasn't found
+    - name: Find Oracle PMON processes
+      shell: pgrep -f ora_pmon
+      register: ora_pmon_pids
+      ignore_errors: yes
+      when: oracle_service_name == '' or (systemd_service_check.rc != 0 and not initd_service_check.stat.exists|default(false))
+
+    - name: Check if Oracle process is managed by systemd
+      shell: systemctl status {{ ora_pmon_pids.stdout_lines[0] }} 2>/dev/null
+      register: systemd_check
+      ignore_errors: yes
+      when:
+        - ora_pmon_pids.stdout_lines is defined
+        - ora_pmon_pids.stdout_lines | length > 0
+
+    - name: Extract systemd service unit name
+      shell: systemctl status {{ ora_pmon_pids.stdout_lines[0] }} --no-pager | grep -o '[^ ]*\.service' | head -1
+      register: systemd_service_name
+      when:
+        - systemd_check is defined
+        - systemd_check.rc is defined
+        - systemd_check.rc == 0
+
+    - name: Set facts for systemd managed Oracle
+      set_fact:
+        oracle_service_type: "systemd"
+        oracle_service_unit: "{{ systemd_service_name.stdout | trim }}"
+      when:
+        - systemd_service_name is defined
+        - systemd_service_name.stdout is defined
+        - systemd_service_name.stdout | trim != ''
+
+    # Check for init.d management if not systemd managed
+    - name: Trace parent process for init.d script
+      shell: |
+        pid="{{ ora_pmon_pids.stdout_lines[0] }}"
+        ppid=$(ps -o ppid= -p $pid | tr -d ' ')
+        init_script=""
+        
+        # Trace parent process to see if it leads to an init script
+        while [ "$ppid" != "1" ] && [ -n "$ppid" ]; do
+          cmd=$(ps -o cmd= -p $ppid 2>/dev/null)
+          if [[ "$cmd" == *"/etc/init.d/"* ]]; then
+            init_script=$(echo "$cmd" | grep -o '/etc/init.d/[^ ]*' | sed 's/.*\/etc\/init.d\///')
+            echo "$init_script"
+            exit 0
+          fi
+          ppid=$(ps -o ppid= -p $ppid 2>/dev/null | tr -d ' ')
+          if [ -z "$ppid" ]; then
+            break
+          fi
+        done
+        
+        # If not found through process tree, look for common Oracle init scripts
+        for script in $(find /etc/init.d -type f | grep -i ora); do
+          script_name=$(basename "$script")
+          if ps -ef | grep -v grep | grep -q "$script_name"; then
+            echo "$script_name"
+            exit 0
+          fi
+        done
+        
+        exit 1
+      register: init_script_result
+      ignore_errors: yes
+      when:
+        - ora_pmon_pids.stdout_lines is defined
+        - ora_pmon_pids.stdout_lines | length > 0
+        - systemd_check is not defined or systemd_check.rc != 0
+
+    - name: Set facts for init.d managed Oracle
+      set_fact:
+        oracle_service_type: "initd"
+        oracle_service_unit: "{{ init_script_result.stdout | trim }}"
+      when:
+        - init_script_result is defined
+        - init_script_result.rc is defined
+        - init_script_result.rc == 0
+        - init_script_result.stdout | trim != ''
+
+    # Detect if the service is chkconfig managed (for init.d services)
+    - name: Check if service is managed by chkconfig
+      shell: command -v chkconfig >/dev/null && chkconfig --list "{{ oracle_service_unit }}" &>/dev/null && echo "yes" || echo "no"
+      register: chkconfig_managed
+      when:
+        - oracle_service_type is defined
+        - oracle_service_type == "initd"
+        - oracle_service_unit is defined
+        - oracle_service_unit != ''
+
+    - name: Set chkconfig fact
+      set_fact:
+        oracle_chkconfig_managed: "{{ chkconfig_managed.stdout == 'yes' }}"
+      when:
+        - chkconfig_managed is defined
+        - chkconfig_managed.stdout is defined
+
+    # Display detection results
+    - name: Display detection results
+      debug:
+        msg: "Detected Oracle service: {{ oracle_service_type | default('unknown') }} - {{ oracle_service_unit | default('unknown') }}{% if oracle_service_type == 'initd' and oracle_chkconfig_managed is defined %} (chkconfig managed: {{ oracle_chkconfig_managed }}){% endif %}"
+      when: oracle_service_type is defined and oracle_service_unit is defined
+
+    - name: Set detection status fact
+      set_fact:
+        oracle_service_detected: true
+      when: oracle_service_type is defined and oracle_service_unit is defined
+
+    - name: Set detection failure status
+      set_fact:
+        oracle_service_detected: false
+      when: oracle_service_type is not defined or oracle_service_unit is not defined
+
+    - name: Display detection failure message
+      debug:
+        msg: "Failed to detect Oracle service management method. Skipping remaining tasks."
+      when: not oracle_service_detected | default(false)
+
+    # Example of a task that would be skipped if detection fails
+    - name: Example subsequent task
+      debug:
+        msg: "This task will only run if Oracle service was successfully detected"
+      when: oracle_service_detected | default(false)
