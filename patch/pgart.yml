@@ -1,0 +1,67 @@
+---
+# Playbook: Update PostgreSQL packages from Artifactory
+# Description: Downloads PostgreSQL RPMs from Artifactory if newer than installed version,
+#              then installs them on the target servers
+
+- name: PostgreSQL Update from Artifactory
+  hosts: postgres_servers  # Adjust this to match your inventory group
+  become: true
+  vars:
+    # Define your Artifactory URL and packages
+    artifactory_base_url: "https://your-artifactory-url/path/to/repository"
+    download_dir: "/tmp/postgres_rpms"
+    postgres_packages:
+      - name: "postgresql-server"
+        version: "14.8-1"
+        filename: "postgresql-server-14.8-1.el8.x86_64.rpm"
+      - name: "postgresql-contrib"
+        version: "14.8-1"
+        filename: "postgresql-contrib-14.8-1.el8.x86_64.rpm"
+      # Add more packages as needed
+
+  tasks:
+    - name: Create download directory if it doesn't exist
+      ansible.builtin.file:
+        path: "{{ download_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Get installed package versions
+      ansible.builtin.shell: "rpm -q {{ item.name }} --qf '%{VERSION}-%{RELEASE}'"
+      register: installed_versions
+      failed_when: false
+      changed_when: false
+      loop: "{{ postgres_packages }}"
+
+    - name: Set fact for installed versions
+      ansible.builtin.set_fact:
+        installed_pkg_versions: "{{ installed_versions.results | map(attribute='stdout') | list }}"
+
+    - name: Debug installed versions
+      ansible.builtin.debug:
+        msg: "Package: {{ item.0.name }}, Installed version: {{ item.1 }}, Artifactory version: {{ item.0.version }}"
+      loop: "{{ postgres_packages | zip(installed_pkg_versions) | list }}"
+
+    - name: Download PostgreSQL packages from Artifactory when newer version available
+      ansible.builtin.get_url:
+        url: "{{ artifactory_base_url }}/{{ item.0.filename }}"
+        dest: "{{ download_dir }}/{{ item.0.filename }}"
+        mode: '0644'
+      loop: "{{ postgres_packages | zip(installed_pkg_versions) | list }}"
+      register: download_result
+      # Download if installed version is different from target version or package isn't installed
+      when: item.1 != item.0.version or item.1.startswith('package')
+
+    - name: Install PostgreSQL packages that were downloaded
+      ansible.builtin.dnf:
+        name: "{{ download_dir }}/{{ item.item.0.filename }}"
+        state: present
+        disable_gpg_check: no  # Set to yes if needed
+      loop: "{{ download_result.results }}"
+      when: item.changed | default(false) and not item.skipped | default(true)
+
+    - name: Clean up downloaded RPM files
+      ansible.builtin.file:
+        path: "{{ download_dir }}"
+        state: absent
+      when: download_result.results | selectattr('changed', 'defined') | selectattr('changed') | list | length > 0
