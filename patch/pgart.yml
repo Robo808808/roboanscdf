@@ -76,10 +76,12 @@
       loop: "{{ pkg_needs_install | default([]) }}"
       when: pkg_needs_install is defined and pkg_needs_install | length > 0
       register: installation_result
+      loop_control:
+        label: "{{ item }}"
 
     - name: Show installation results
       ansible.builtin.debug:
-        msg: "Installed packages: {{ installation_result.results | map(attribute='name') | list }}"
+        msg: "Installed packages: {{ pkg_needs_install | default([]) }}"
       when: installation_result.changed | default(false)
 
     - name: Show no changes needed message
