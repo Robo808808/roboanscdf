@@ -53,8 +53,114 @@
         pkg_needs_install: "{{ pkg_needs_install | default([]) + [item] }}"
       loop: "{{ package_inventory[os_key][postgres_target_version] }}"
       when: >
-        item | regex_replace('-[^-]+-[^-]+\\.rpm$', '') not in ansible_facts.packages or 
-        postgres_target_version not in (ansible_facts.packages[item | regex_replace('-[^-]+-[^-]+\\.rpm$', '')] | map(attribute='version') | list)
+        item | regex_replace('-[^-]+-[^-]+\\.rpm
+    - name: Debug packages needing install
+      ansible.builtin.debug:
+        var: pkg_needs_install
+
+    - name: Download PostgreSQL packages from Artifactory
+      ansible.builtin.get_url:
+        url: "{{ artifactory_base_url }}/{{ item }}"
+        dest: "{{ download_dir }}/{{ item }}"
+        mode: '0644'
+      loop: "{{ pkg_needs_install | default([]) }}"
+      register: download_result
+
+    - name: Install PostgreSQL packages using dnf module (normal installation)
+      ansible.builtin.dnf:
+        name: "{{ download_dir }}/{{ item }}"
+        state: present
+        disable_gpg_check: no  # Set to yes if needed
+      loop: "{{ pkg_needs_install | default([]) }}"
+      when:
+        - pkg_needs_install is defined and pkg_needs_install | length > 0
+        - not (rollback | default(false))
+      register: installation_result_normal
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Install PostgreSQL packages using dnf module (with downgrade)
+      ansible.builtin.dnf:
+        name: "{{ download_dir }}/{{ item }}"
+        state: present
+        disable_gpg_check: no  # Set to yes if needed
+        allow_downgrade: yes   # Enable package downgrade for rollback scenarios
+      loop: "{{ pkg_needs_install | default([]) }}"
+      when:
+        - pkg_needs_install is defined and pkg_needs_install | length > 0
+        - rollback | default(false)
+      register: installation_result_downgrade
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Set combined installation result
+      ansible.builtin.set_fact:
+        installation_result:
+          changed: "{{ (installation_result_normal.changed | default(false)) or (installation_result_downgrade.changed | default(false)) }}"
+
+    - name: Show installation results (normal installation)
+      ansible.builtin.debug:
+        msg: "Installed packages: {{ pkg_needs_install | default([]) }}"
+      when: installation_result_normal.changed | default(false)
+
+    - name: Show installation results (with downgrade)
+      ansible.builtin.debug:
+        msg: "Downgraded packages: {{ pkg_needs_install | default([]) }}"
+      when: installation_result_downgrade.changed | default(false)
+
+    - name: Show no changes needed message
+      ansible.builtin.debug:
+        msg: "All packages already at the correct version. No changes made."
+      when: pkg_needs_install is not defined or pkg_needs_install | length == 0
+
+    - name: Clean up downloaded RPM files
+      ansible.builtin.file:
+        path: "{{ download_dir }}"
+        state: absent
+      when: pkg_needs_install is defined and pkg_needs_install | length > 0
+, '') not in ansible_facts.packages or 
+        postgres_target_version not in (ansible_facts.packages[item | regex_replace('-[^-]+-[^-]+\\.rpm
+    - name: Debug packages needing install
+      ansible.builtin.debug:
+        var: pkg_needs_install
+
+    - name: Download PostgreSQL packages from Artifactory
+      ansible.builtin.get_url:
+        url: "{{ artifactory_base_url }}/{{ item }}"
+        dest: "{{ download_dir }}/{{ item }}"
+        mode: '0644'
+      loop: "{{ pkg_needs_install | default([]) }}"
+      register: download_result
+
+    - name: Install or downgrade PostgreSQL packages using dnf module
+      ansible.builtin.dnf:
+        name: "{{ download_dir }}/{{ item }}"
+        state: present
+        disable_gpg_check: no  # Set to yes if needed
+        allow_downgrade: yes   # Enable package downgrade for rollback scenarios
+      loop: "{{ pkg_needs_install | default([]) }}"
+      when: pkg_needs_install is defined and pkg_needs_install | length > 0
+      register: installation_result
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Show installation results
+      ansible.builtin.debug:
+        msg: "Installed packages: {{ pkg_needs_install | default([]) }}"
+      when: installation_result.changed | default(false)
+
+    - name: Show no changes needed message
+      ansible.builtin.debug:
+        msg: "All packages already at the correct version. No changes made."
+      when: pkg_needs_install is not defined or pkg_needs_install | length == 0
+
+    - name: Clean up downloaded RPM files
+      ansible.builtin.file:
+        path: "{{ download_dir }}"
+        state: absent
+      when: pkg_needs_install is defined and pkg_needs_install | length > 0
+, '')] | map(attribute='version') | list) or
+        rollback | default(false)
 
     - name: Debug packages needing install
       ansible.builtin.debug:
@@ -68,11 +174,12 @@
       loop: "{{ pkg_needs_install | default([]) }}"
       register: download_result
 
-    - name: Install PostgreSQL packages using dnf module
+    - name: Install or downgrade PostgreSQL packages using dnf module
       ansible.builtin.dnf:
         name: "{{ download_dir }}/{{ item }}"
         state: present
         disable_gpg_check: no  # Set to yes if needed
+        allow_downgrade: yes   # Enable package downgrade for rollback scenarios
       loop: "{{ pkg_needs_install | default([]) }}"
       when: pkg_needs_install is defined and pkg_needs_install | length > 0
       register: installation_result
