@@ -1,0 +1,36 @@
+- name: Find all downloaded RPM files
+  ansible.builtin.find:
+    paths: "/path/to/download/directory"
+    patterns: "*.rpm"
+  register: rpm_files
+
+- name: Perform multiple validation checks on RPM files
+  block:
+    - name: Check file command output for RPM format
+      ansible.builtin.command: "file {{ item.path }}"
+      register: file_check
+      failed_when: "'RPM' not in file_check.stdout"
+      changed_when: false
+      loop: "{{ rpm_files.files }}"
+
+    - name: Validate RPM file structure with rpm command
+      ansible.builtin.command: "rpm -qp --queryformat '%{NAME}' {{ item.path }}"
+      register: rpm_validation
+      failed_when: rpm_validation.rc != 0
+      changed_when: false
+      loop: "{{ rpm_files.files }}"
+
+    - name: Check RPM signature (optional)
+      ansible.builtin.command: "rpm -K {{ item.path }}"
+      register: rpm_signature
+      changed_when: false
+      loop: "{{ rpm_files.files }}"
+
+  rescue:
+    - name: Report invalid RPM files
+      ansible.builtin.debug:
+        msg: "Some files failed RPM validation. Check the logs for details."
+
+    - name: Fail the play with error
+      ansible.builtin.fail:
+        msg: "Downloaded files are not valid RPM files"
