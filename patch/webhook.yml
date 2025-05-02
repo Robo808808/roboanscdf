@@ -1,0 +1,69 @@
+import requests
+import json
+
+def send_teams_message_with_colors(webhook_url):
+    # Example 1: Using HTML-like formatting with spans
+    payload1 = {
+        "@type": "MessageCard",
+        "@context": "http://schema.org/extensions",
+        "title": "Status Report",
+        "text": "<span style='color: green;'>✅ All systems operational</span><br><span style='color: red;'>❌ Database connection failed</span>"
+    }
+
+    # Example 2: Using container styling with adaptive cards
+    payload2 = {
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.4",
+        "body": [
+            {
+                "type": "TextBlock",
+                "text": "Status Report",
+                "weight": "bolder",
+                "size": "medium"
+            },
+            {
+                "type": "Container",
+                "style": "good",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "✅ All systems operational",
+                        "wrap": true
+                    }
+                ]
+            },
+            {
+                "type": "Container",
+                "style": "attention",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "❌ Database connection failed",
+                        "wrap": true
+                    }
+                ]
+            }
+        ]
+    }
+
+    # Choose which payload to send
+    # payload = payload1  # HTML-like formatting
+    payload = payload2    # Container styling
+    
+    headers = {
+        'Content-Type': 'application/json'
+    }
+
+    response = requests.post(webhook_url, headers=headers, data=json.dumps(payload))
+
+    if response.status_code == 200:
+        print("Message sent successfully!")
+    else:
+        print(f"Failed to send message. Status code: {response.status_code}")
+        print(f"Response: {response.text}")
+
+# Usage
+if __name__ == "__main__":
+    webhook_url = "YOUR_WEBHOOK_URL_HERE"  # Replace with your actual Teams webhook URL
+    send_teams_message_with_colors(webhook_url)
