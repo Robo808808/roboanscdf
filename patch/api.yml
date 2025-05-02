@@ -1,5 +1,5 @@
 ---
-# Enhanced API Authentication Workflow with improved error handling and token management
+# Enhanced API Authentication Workflow with improved error handling and token management step
 
 - name: API Authentication and Interaction Workflow
   hosts: localhost

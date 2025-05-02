@@ -2,7 +2,7 @@
 """
 Email Sender Utility - Send emails with attachments
 
-Usage:
+Usage Example:
     python email_sender.py --to recipient@example.com --subject "Email Subject"
                           --body "Email body text" --attachment /path/to/file.pdf
                           [--cc cc@example.com] [--bcc bcc@example.com]
