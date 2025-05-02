@@ -1,0 +1,99 @@
+---
+# Enhanced API Authentication Workflow with improved error handling and token management
+
+- name: API Authentication and Interaction Workflow
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # Common request settings
+    request_timeout: 30
+    content_type: "application/json"
+    validate_certs: yes
+
+  tasks:
+    - name: Include API credentials from vault
+      ansible.builtin.include_vars:
+        file: group_vars/api_credentials.yml
+      no_log: true
+
+    - name: Block - API Authentication Workflow
+      block:
+        - name: Step 1 - Obtain JWT token
+          ansible.builtin.uri:
+            url: "{{ api_base_url }}{{ api_login_endpoint }}"
+            method: POST
+            body_format: json
+            body:
+              username: "{{ api_username }}"
+              password: "{{ api_password }}"
+            headers:
+              Content-Type: "{{ content_type }}"
+            status_code: [200, 201]
+            timeout: "{{ request_timeout }}"
+            validate_certs: "{{ validate_certs }}"
+          register: auth_response
+          no_log: true
+
+        - name: Extract JWT token
+          ansible.builtin.set_fact:
+            jwt_token: "{{ auth_response.json.token }}"  # Adjust path based on API response
+          no_log: true
+
+        - name: Create auth header for subsequent requests
+          ansible.builtin.set_fact:
+            auth_headers:
+              Content-Type: "{{ content_type }}"
+              Authorization: "Bearer {{ jwt_token }}"
+          no_log: true
+
+        - name: Step 2 - Make API call with JWT token
+          ansible.builtin.uri:
+            url: "{{ api_base_url }}{{ api_data_endpoint }}"
+            method: GET
+            headers: "{{ auth_headers }}"
+            status_code: [200, 201, 202]
+            timeout: "{{ request_timeout }}"
+            validate_certs: "{{ validate_certs }}"
+          register: api_response
+
+        - name: Process API response data
+          block:
+            - name: Extract data from API response
+              ansible.builtin.set_fact:
+                api_data: "{{ api_response.json }}"
+
+            - name: Process or transform data if needed
+              ansible.builtin.debug:
+                msg: "API data processed successfully"
+              # Add data transformation tasks here if needed
+          when: api_response.json is defined
+
+      rescue:
+        - name: Capture error details
+          ansible.builtin.set_fact:
+            error_details: "{{ ansible_failed_result }}"
+
+        - name: Display error information
+          ansible.builtin.debug:
+            msg: "API workflow failed: {{ error_details.msg | default('Unknown error') }}"
+
+      always:
+        - name: Step 3 - Log off / Invalidate token (if token exists)
+          ansible.builtin.uri:
+            url: "{{ api_base_url }}{{ api_logout_endpoint }}"
+            method: POST
+            headers: "{{ auth_headers | default({}) }}"
+            status_code: [200, 201, 202, 204]
+            timeout: "{{ request_timeout }}"
+            validate_certs: "{{ validate_certs }}"
+          register: logout_response
+          # Skip if no token was obtained (login failed)
+          when: jwt_token is defined
+          # Don't fail the play if logout fails
+          failed_when: false
+
+        - name: Remove sensitive variables from memory
+          ansible.builtin.set_fact:
+            jwt_token: null
+            auth_headers: null
+            api_password: null
