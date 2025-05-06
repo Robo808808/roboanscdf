@@ -1,20 +1,16 @@
----
 # Ansible task to zip Oracle home directory
 # File will be saved to Oracle base/product with version in the name
+# This version uses a variable oracle_home instead of discovering it
 
-- name: Discover Oracle home directory structure
-  shell: |
-    find /u*/app*/*/product -maxdepth 2 -mindepth 2 -type d -name "dbhome_*" | head -1
-  register: oracle_home_path
-  changed_when: false
-  ignore_errors: yes
-
-- name: Set Oracle paths as facts
+- name: Set Oracle base path based on oracle_home
   set_fact:
-    oracle_home: "{{ oracle_home_path.stdout }}"
-    oracle_base: "{{ oracle_home_path.stdout | regex_replace('(/product/[^/]+/dbhome_\\d+)$', '') }}"
-    oracle_version: "{{ oracle_home_path.stdout | regex_replace('^.*?/product/([^/]+)/dbhome_\\d+$', '\\1') }}"
-  when: oracle_home_path.stdout is defined and oracle_home_path.stdout != ''
+    oracle_base: "{{ oracle_home | regex_replace('(/product/[^/]+/dbhome_\\d+)$', '') }}"
+  when: oracle_home is defined
+
+- name: Extract Oracle version from oracle_home path
+  set_fact:
+    oracle_version: "{{ oracle_home | regex_replace('^.*?/product/([^/]+)/dbhome_\\d+$', '\\1') }}"
+  when: oracle_home is defined
 
 - name: Show determined paths
   debug:
