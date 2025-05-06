@@ -1,0 +1,84 @@
+# Ansible playbook to clean up old Oracle backup files
+# Removes backup files for versions less than the specified orasw_version
+
+- name: Validate required variables
+  fail:
+    msg: >
+      Missing required variables. Please provide:
+      - oracle_base: Path to Oracle base directory
+      - orasw_version: Current Oracle software version (e.g. 19.27)
+  when: oracle_base is not defined or oracle_base | length == 0 or 
+        orasw_version is not defined or orasw_version | length == 0
+
+- name: Find all Oracle backup files
+  find:
+    paths: "{{ oracle_base }}/product"
+    patterns: "oracle_*_backup_*.zip"
+  register: backup_files
+
+- name: Display all found backup files
+  debug:
+    msg: "Found backup file: {{ item.path }}"
+  loop: "{{ backup_files.files }}"
+  when: backup_files.files | length > 0
+
+- name: Extract version from each backup file and compare with orasw_version (only remove when major versions match)
+  block:
+    - name: Set current major version
+      set_fact:
+        current_major_version: "{{ orasw_version.split('.')[0] | int }}"
+        current_minor_version: "{{ orasw_version.split('.')[1] | int if orasw_version.split('.')[1] is defined else 0 }}"
+
+    - name: Process each backup file for cleanup
+      ansible.builtin.shell: |
+        filename="{{ item.path | basename }}"
+        version=$(echo $filename | sed -n 's/oracle_\([0-9.]*\)_backup_.*/\1/p')
+        major=$(echo $version | cut -d. -f1)
+        minor=$(echo $version | cut -d. -f2)
+        
+        # Default minor to 0 if not present
+        if [ -z "$minor" ]; then
+          minor=0
+        fi
+        
+        # Return 'true' only if major versions match and minor version is less
+        if [ $major -eq {{ current_major_version }} ] && [ $minor -lt {{ current_minor_version }} ]; then
+          echo "true"
+        else
+          echo "false"
+        fi
+      args:
+        executable: /bin/bash
+      register: version_check
+      loop: "{{ backup_files.files }}"
+
+    - name: Create list of files to remove
+      set_fact:
+        files_to_remove: "{{ files_to_remove | default([]) + [item.0.path] }}"
+      loop: "{{ backup_files.files | zip(version_check.results) | list }}"
+      when: item.1.stdout | trim == "true"
+
+    - name: Display files to be removed
+      debug:
+        msg: "Will remove outdated backup file: {{ item }}"
+      loop: "{{ files_to_remove | default([]) }}"
+      when: files_to_remove is defined and files_to_remove | length > 0
+
+    - name: Remove outdated backup files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ files_to_remove | default([]) }}"
+      when: files_to_remove is defined and files_to_remove | length > 0
+      register: removal_result
+
+    - name: Display removal summary
+      debug:
+        msg: "Removed {{ files_to_remove | length }} outdated Oracle backup files"
+      when: files_to_remove is defined and files_to_remove | length > 0
+
+    - name: No files needed removal
+      debug:
+        msg: "No outdated Oracle backup files found"
+      when: files_to_remove is not defined or files_to_remove | length == 0
+  when: backup_files.files | length > 0
