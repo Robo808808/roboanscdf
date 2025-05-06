@@ -1,0 +1,43 @@
+---
+# Ansible task to zip Oracle home directory
+# File will be saved to Oracle base/product with version in the name
+
+- name: Discover Oracle home directory structure
+  shell: |
+    find /u*/app*/*/product -maxdepth 2 -mindepth 2 -type d -name "dbhome_*" | head -1
+  register: oracle_home_path
+  changed_when: false
+  ignore_errors: yes
+
+- name: Set Oracle paths as facts
+  set_fact:
+    oracle_home: "{{ oracle_home_path.stdout }}"
+    oracle_base: "{{ oracle_home_path.stdout | regex_replace('(/product/[^/]+/dbhome_\\d+)$', '') }}"
+    oracle_version: "{{ oracle_home_path.stdout | regex_replace('^.*?/product/([^/]+)/dbhome_\\d+$', '\\1') }}"
+  when: oracle_home_path.stdout is defined and oracle_home_path.stdout != ''
+
+- name: Show determined paths
+  debug:
+    msg:
+      - "Oracle Home: {{ oracle_home }}"
+      - "Oracle Base: {{ oracle_base }}"
+      - "Oracle Version: {{ oracle_version }}"
+  when: oracle_home is defined
+
+- name: Create timestamp
+  set_fact:
+    timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+  when: oracle_home is defined
+
+- name: Create zip file of Oracle home
+  archive:
+    path: "{{ oracle_home }}"
+    dest: "{{ oracle_base }}/product/oracle_{{ oracle_version }}_backup_{{ timestamp }}.zip"
+    format: zip
+  when: oracle_home is defined
+  register: zip_result
+
+- name: Show backup result
+  debug:
+    msg: "Oracle home backup created: {{ zip_result.dest }}"
+  when: zip_result.dest is defined
