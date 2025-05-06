@@ -1,0 +1,141 @@
+---
+- name: Pre Task to update known_hosts
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    ssh_algorithm: ecdsa-sha2-nistp256
+
+  tasks:
+    - name: Get host IP using getent
+      command: getent hosts {{ item }}
+      register: getent_output
+      changed_when: false
+      ignore_errors: yes
+      loop: "{{ groups['all'] }}"
+
+    - name: Get SSH key from target host
+      shell: ssh-keyscan -T 5 -t {{ ssh_algorithm }} {{ item }}
+      register: ssh_keyscan_results
+      failed_when: false
+      changed_when: false
+      loop: "{{ groups['all'] }}"
+
+    - name: Process and add hosts to known_hosts
+      block:
+        - name: Set facts for each host
+          set_fact:
+            host_info: >-
+              {{ host_info | default({}) | combine({
+                item.item: {
+                  'ip': item.stdout.split()[0] if item is succeeded and item.stdout != '' else item.item,
+                  'success': true if item is succeeded and item.stdout != '' else false
+                }
+              }) }}
+          loop: "{{ getent_output.results }}"
+
+        - name: Set key information for each host
+          set_fact:
+            host_info: >-
+              {{ host_info | combine({
+                item.item: host_info[item.item] | combine({
+                  'key': item.stdout_lines[0].split(' ', 1)[1] if item is succeeded and item.stdout_lines | length > 0 else '',
+                  'key_success': true if item is succeeded and item.stdout_lines | length > 0 else false
+                })
+              }) }}
+          loop: "{{ ssh_keyscan_results.results }}"
+
+        - name: Add entries to known_hosts
+          lineinfile:
+            path: ~/.ssh/known_hosts
+            line: "{{ item }},{{ host_info[item].ip }} {{ host_info[item].key }}"
+            state: present
+          loop: "{{ groups['all'] }}"
+          when: host_info[item].key_success | bool
+
+        - name: Report successful additions
+          debug:
+            msg: "Successfully added {{ item }} to known_hosts"
+          loop: "{{ groups['all'] }}"
+          when: host_info[item].key_success | bool
+
+        - name: Report failed additions
+          debug:
+            msg: "Failed to add {{ item }} to known_hosts"
+          loop: "{{ groups['all'] }}"
+          when: not (host_info[item].key_success | bool)
+
+- name: Patch PostgreSQL DB
+  hosts: all
+  become: True
+  gather_facts: yes
+
+  roles:
+    - role: pgpatch-prechecks
+    - role: pgpatch-patch
+    - role: pgpatch-postchecks
+
+
+# or
+
+---
+- name: Pre Task to update known_hosts
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    ssh_algorithm: ecdsa-sha2-nistp256
+
+  tasks:
+    - name: Loop through all hosts in inventory
+      include_tasks: add_host_to_known_hosts.yml
+      loop: "{{ groups['all'] }}"
+      loop_control:
+        loop_var: target_host
+
+- name: Patch PostgreSQL DB
+  hosts: all
+  become: True
+  gather_facts: yes
+
+  roles:
+    - role: pgpatch-prechecks
+    - role: pgpatch-patch
+    - role: pgpatch-postchecks  # Fixed typo in role name
+
+
+
+---
+- name: Get host IP using getent
+  command: getent hosts {{ target_host }}
+  register: getent_output
+  changed_when: false
+  ignore_errors: yes  # In case hostname can't be resolved
+
+- name: Set IP fact
+  set_fact:
+    target_ip: "{{ getent_output.stdout.split()[0] }}"
+  when: getent_output is succeeded
+
+- name: Use hostname as IP if getent fails
+  set_fact:
+    target_ip: "{{ target_host }}"
+  when: getent_output is failed
+
+- name: Get SSH key from target host
+  shell: ssh-keyscan -T 5 -t {{ ssh_algorithm }} {{ target_host }}
+  register: ssh_keyscan
+  changed_when: false
+  failed_when: ssh_keyscan.rc != 0 or ssh_keyscan.stdout == ""
+
+- name: Show debugging information
+  debug:
+    msg: "Adding SSH key for host {{ target_host }} ({{ target_ip }})"
+  when: ssh_keyscan is succeeded
+
+- name: Add combined hostname and IP entry to known_hosts
+  lineinfile:
+    path: ~/.ssh/known_hosts
+    line: "{{ target_host }},{{ target_ip }} {{ ssh_keyscan.stdout_lines[0].split(' ',1)[1] }}"
+    state: present
+  when: ssh_keyscan is succeeded and ssh_keyscan.stdout_lines | length > 0
