@@ -1,0 +1,81 @@
+# Ansible task to drop AUTOUPGRADE guaranteed restore points for a specific Oracle SID
+
+- name: Validate that oracle_sid is defined
+  fail:
+    msg: "The variable 'oracle_sid' must be defined. Please provide it with -e 'oracle_sid=your_sid'"
+  when: oracle_sid is not defined or oracle_sid | length == 0
+
+- name: Set Oracle environment if env_script is provided
+  shell: |
+    . {{ env_script }}
+    sqlplus -s / as sysdba
+  args:
+    executable: /bin/bash
+  register: sqlplus_check
+  ignore_errors: true
+  when: env_script is defined and env_script | length > 0
+  changed_when: false
+
+- name: Run PL/SQL block to drop AUTOUPGRADE guaranteed restore points
+  shell: |
+    {% if env_script is defined and env_script | length > 0 %}
+    . {{ env_script }}
+    {% endif %}
+    sqlplus -s / as sysdba << EOF
+    SET SERVEROUTPUT ON SIZE UNLIMITED
+    SET LINESIZE 200
+    SET HEADING OFF
+    SET FEEDBACK OFF
+    SET VERIFY OFF
+    
+    DECLARE
+      v_rp_pattern VARCHAR2(100) := 'AUTOUPGRADE_%_{{ oracle_sid | upper }}%';
+      v_rp_count NUMBER := 0;
+      v_rp_name VARCHAR2(100);
+      
+      CURSOR c_restore_points IS
+        SELECT name
+        FROM v\$restore_point
+        WHERE name LIKE v_rp_pattern
+        AND guarantee_flashback_database = 'YES';
+    BEGIN
+      DBMS_OUTPUT.PUT_LINE('Checking for AUTOUPGRADE guaranteed restore points for SID: {{ oracle_sid | upper }}...');
+      
+      FOR rp IN c_restore_points LOOP
+        v_rp_name := rp.name;
+        v_rp_count := v_rp_count + 1;
+        
+        DBMS_OUTPUT.PUT_LINE('Found restore point: ' || v_rp_name);
+        DBMS_OUTPUT.PUT_LINE('Dropping restore point: ' || v_rp_name);
+        
+        BEGIN
+          EXECUTE IMMEDIATE 'DROP RESTORE POINT ' || v_rp_name;
+          DBMS_OUTPUT.PUT_LINE('Successfully dropped restore point: ' || v_rp_name);
+        EXCEPTION
+          WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('Error dropping restore point ' || v_rp_name || ': ' || SQLERRM);
+        END;
+      END LOOP;
+      
+      IF v_rp_count = 0 THEN
+        DBMS_OUTPUT.PUT_LINE('No AUTOUPGRADE guaranteed restore points found for SID: {{ oracle_sid | upper }}');
+      ELSE
+        DBMS_OUTPUT.PUT_LINE('Total AUTOUPGRADE guaranteed restore points processed: ' || v_rp_count);
+      END IF;
+    EXCEPTION
+      WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('Error during restore point processing: ' || SQLERRM);
+    END;
+    /
+    
+    EXIT;
+    EOF
+  args:
+    executable: /bin/bash
+  register: sql_result
+  changed_when: "'Successfully dropped restore point' in sql_result.stdout"
+  failed_when: "sql_result.rc != 0"
+
+- name: Display SQL results
+  debug:
+    msg: "{{ sql_result.stdout_lines }}"
