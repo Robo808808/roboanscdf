@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oracle Services Discovery Report</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+        }
+        h1, h2, h3 {
+            color: #064578;
+        }
+        .header {
+            background-color: #f5f5f5;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            border-left: 5px solid #064578;
+        }
+        .summary {
+            margin-bottom: 30px;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-bottom: 30px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        .status-up {
+            color: green;
+            font-weight: bold;
+        }
+        .status-down {
+            color: red;
+            font-weight: bold;
+        }
+        .status-warning {
+            color: orange;
+            font-weight: bold;
+        }
+        .detail-section {
+            background-color: #f8f8f8;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .service-list {
+            list-style-type: disc;
+            margin-left: 20px;
+        }
+        .error-message {
+            color: #721c24;
+            background-color: #f8d7da;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        .footer {
+            margin-top: 40px;
+            font-size: 12px;
+            color: #777;
+            text-align: center;
+            border-top: 1px solid #eee;
+            padding-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Oracle Services Discovery Report</h1>
+        <p>Generated on: {{ ansible_date_time.date }} at {{ ansible_date_time.time }}</p>
+        <p>Host: {{ ansible_hostname }} ({{ ansible_fqdn }})</p>
+    </div>
+
+    <div class="summary">
+        <h2>Executive Summary</h2>
+        <p>
+            <strong>Total Oracle SIDs:</strong> {{ db_results | default([]) | length }}<br>
+            <strong>Primary Databases:</strong> {{ db_results | default([]) | selectattr('role', 'defined') | selectattr('role', 'equalto', 'PRIMARY') | list | length }}<br>
+            <strong>Standby Databases:</strong> {{ db_results | default([]) | selectattr('role', 'defined') | selectattr('role', 'equalto', 'PHYSICAL STANDBY') | list | length }}<br>
+            <strong>Databases with Issues:</strong> {{ db_results | default([]) | selectattr('status', 'equalto', 'DOWN') | list | length + db_results | default([]) | selectattr('error', 'defined') | selectattr('error', 'ne', None) | list | length }}<br>
+            <strong>Total Oracle Listeners:</strong> {{ listener_results | default([]) | length }}<br>
+            <strong>Listeners with Issues:</strong> {{ listener_results | default([]) | selectattr('status', 'equalto', 'DOWN') | list | length }}
+        </p>
+    </div>
+
+    <h2>Database Status</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>SID</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Open Mode</th>
+                <th>Details</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for db in db_results | default([]) %}
+            <tr>
+                <td>{{ db.sid }}</td>
+                <td>{{ db.role | default('N/A') }}</td>
+                <td class="status-{% if db.status == 'UP' %}up{% else %}down{% endif %}">{{ db.status }}</td>
+                <td>{{ db.open_mode | default('N/A') }}</td>
+                <td>
+                    {% if db.role is defined and db.role == 'PRIMARY' %}
+                        {% if db.active_connections is defined %}
+                        Active Connections: {{ db.active_connections }}
+                        {% endif %}
+                    {% elif db.role is defined and db.role == 'PHYSICAL STANDBY' %}
+                        MRP Running:
+                        {% if db.mrp_running is defined %}
+                            <span class="status-{% if db.mrp_running %}up{% else %}down{% endif %}">
+                                {{ 'Yes' if db.mrp_running else 'No' }}
+                            </span><br>
+                            {% if db.apply_lag_minutes is defined %}
+                                Apply Lag:
+                                <span class="status-{% if db.apply_lag_minutes > 30 %}warning{% elif db.apply_lag_minutes > 60 %}down{% else %}up{% endif %}">
+                                    {{ db.apply_lag_minutes }} minutes
+                                </span>
+                            {% endif %}
+                        {% else %}
+                            N/A
+                        {% endif %}
+                    {% endif %}
+
+                    {% if db.error is defined and db.error != None %}
+                        <div class="error-message">{{ db.error }}</div>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <h2>Listener Status</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Listener</th>
+                <th>ORACLE_HOME</th>
+                <th>Status</th>
+                <th>Services</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for listener in listener_results | default([]) %}
+            <tr>
+                <td>{{ listener.listener_name }}</td>
+                <td>{{ listener.oracle_home }}</td>
+                <td class="status-{% if listener.status == 'UP' %}up{% else %}down{% endif %}">{{ listener.status }}</td>
+                <td>
+                    {% if listener.services is defined and listener.services|length > 0 %}
+                        <ul class="service-list">
+                        {% for service in listener.services %}
+                            <li>{{ service }}</li>
+                        {% endfor %}
+                        </ul>
+                    {% else %}
+                        No services registered
+                    {% endif %}
+
+                    {% if listener.error is defined and listener.error != None %}
+                        <div class="error-message">{{ listener.error }}</div>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <h2>Detailed Database Information</h2>
+    {% for db in db_results | default([]) %}
+    <div class="detail-section">
+        <h3>{{ db.sid }} ({{ db.role | default('Role Unknown') }})</h3>
+        <p><strong>ORACLE_HOME:</strong> {{ db.oracle_home }}</p>
+        <p><strong>Status:</strong> <span class="status-{% if db.status == 'UP' %}up{% else %}down{% endif %}">{{ db.status }}</span></p>
+
+        {% if db.open_mode is defined %}
+        <p><strong>Open Mode:</strong> {{ db.open_mode }}</p>
+        {% endif %}
+
+        {% if db.role is defined and db.role == 'PRIMARY' %}
+            {% if db.active_connections is defined %}
+            <p><strong>Active Connections:</strong> {{ db.active_connections }}</p>
+            {% endif %}
+
+            {% if db.connection_error is defined %}
+            <div class="error-message">Connection Error: {{ db.connection_error }}</div>
+            {% endif %}
+        {% elif db.role is defined and db.role == 'PHYSICAL STANDBY' %}
+            {% if db.mrp_running is defined %}
+            <p>
+                <strong>MRP Running:</strong>
+                <span class="status-{% if db.mrp_running %}up{% else %}down{% endif %}">
+                    {{ 'Yes' if db.mrp_running else 'No' }}
+                </span>
+            </p>
+            {% endif %}
+
+            {% if db.apply_lag_minutes is defined %}
+            <p>
+                <strong>Apply Lag:</strong>
+                <span class="status-{% if db.apply_lag_minutes > 30 %}warning{% elif db.apply_lag_minutes > 60 %}down{% else %}up{% endif %}">
+                    {{ db.apply_lag_minutes }} minutes
+                </span>
+            </p>
+            {% endif %}
+
+            {% if db.mrp_error is defined %}
+            <div class="error-message">MRP Error: {{ db.mrp_error }}</div>
+            {% endif %}
+        {% endif %}
+
+        {% if db.error is defined and db.error != None %}
+        <div class="error-message">{{ db.error }}</div>
+        {% endif %}
+    </div>
+    {% endfor %}
+
+    <div class="footer">
+        <p>Generated by Ansible Oracle Discovery Playbook | &copy; {{ ansible_date_time.year }}</p>
+    </div>
+</body>
+</html>

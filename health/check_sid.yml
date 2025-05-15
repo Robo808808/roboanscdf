@@ -1,0 +1,56 @@
+---
+# check_sid.yml - Included task file for checking each Oracle SID
+
+- name: Set SID and ORACLE_HOME variables
+  set_fact:
+    current_sid: "{{ sid_entry.split(':')[0] }}"
+    current_oracle_home: "{{ sid_entry.split(':')[1] }}"
+  when: sid_entry.split(':')[1] != ''
+
+- name: Skip entries with empty ORACLE_HOME
+  debug:
+    msg: "Skipping entry {{ current_sid }} - no ORACLE_HOME specified"
+  when: sid_entry.split(':')[1] == ''
+
+- name: Check database status
+  shell: "{{ oracle_output_dir }}/check_oracle_db.py {{ current_sid }} {{ current_oracle_home }}"
+  register: db_check_result
+  failed_when: false
+  changed_when: false
+  when: sid_entry.split(':')[1] != ''
+
+- name: Save database check result
+  set_fact:
+    db_results: "{{ db_results | default([]) + [db_check_result.stdout | from_json] }}"
+  when: sid_entry.split(':')[1] != '' and db_check_result.rc == 0
+
+- name: Handle failed database check
+  set_fact:
+    db_results: "{{ db_results | default([]) + [{'sid': current_sid, 'oracle_home': current_oracle_home, 'status': 'ERROR', 'error': db_check_result.stderr}] }}"
+  when: sid_entry.split(':')[1] != '' and db_check_result.rc != 0
+
+- name: Discover listeners for this ORACLE_HOME
+  shell: "{{ oracle_output_dir }}/discover_listeners.py {{ current_oracle_home }}"
+  register: listener_discovery_result
+  failed_when: false
+  changed_when: false
+  when: sid_entry.split(':')[1] != ''
+
+- name: Process listener discovery result
+  set_fact:
+    current_home_listeners: "{{ listener_discovery_result.stdout | from_json }}"
+  when: sid_entry.split(':')[1] != '' and listener_discovery_result.rc == 0
+
+- name: Check listener status for each discovered listener
+  shell: "{{ oracle_output_dir }}/check_oracle_listener.py {{ item }} {{ current_oracle_home }}"
+  register: listener_check_result
+  failed_when: false
+  changed_when: false
+  loop: "{{ current_home_listeners.listeners }}"
+  when: sid_entry.split(':')[1] != '' and listener_discovery_result.rc == 0 and current_home_listeners.listeners | length > 0
+
+- name: Save listener check results
+  set_fact:
+    listener_results: "{{ listener_results | default([]) + [item.stdout | from_json] }}"
+  with_items: "{{ listener_check_result.results }}"
+  when: sid_entry.split(':')[1] != '' and listener_discovery_result.rc == 0 and listener_check_result is defined and 'results' in listener_check_result
