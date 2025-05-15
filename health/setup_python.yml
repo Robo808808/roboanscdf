@@ -1,141 +1,165 @@
 ---
-- name: Setup Oracle Python Environment for User
+- name: Setup Python Environment for Oracle User from Source
   hosts: oracle_servers
   remote_user: oracle
-  become: no  # Not using root
+  become: no  # Not using root for most tasks
 
   vars:
-    # Artifactory settings
-    artifactory_url: "https://your-artifactory-instance/artifactory"
-    artifactory_repo: "python-local"
-    artifactory_user: "{{ lookup('env', 'ARTIFACTORY_USER') }}"
-    artifactory_password: "{{ lookup('env', 'ARTIFACTORY_PASSWORD') }}"
+    # Python version to install
+    python_version: "3.10.12"
+    python_source_url: "https://www.python.org/ftp/python/{{ python_version }}/Python-{{ python_version }}.tar.xz"
 
-    # Environment settings
+    # Installation directories
+    build_dir: "{{ ansible_env.HOME }}/build"
+    python_dir: "{{ ansible_env.HOME }}/python{{ python_version }}"
     venv_dir: "{{ ansible_env.HOME }}/oracle_venv"
 
-    # Package options - uncomment the approach you want to use
-    use_cx_oracle: true  # Set to false if you want to use the Python 3.8+ approach instead
-    cx_oracle_version: "8.3.0"  # Last version that supports Python 3.6
+    # Choose package to install
+    use_cx_oracle: false  # Set to true to use cx_Oracle with Python 3.6 instead
+
+    # Artifactory settings (if needed)
+    artifactory_url: "https://your-artifactory-instance/artifactory"
+    artifactory_repo: "python-local"
+    artifactory_user: "{{ lookup('env', 'ARTIFACTORY_USER') | default('') }}"
+    artifactory_password: "{{ lookup('env', 'ARTIFACTORY_PASSWORD') | default('') }}"
 
   tasks:
-    # Check Python version
-    - name: Get Python version
-      command: python3 -c "import sys; print(sys.version_info.major, sys.version_info.minor)"
-      register: python_version
+    # Step 1: Create build directories
+    - name: Create build directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ build_dir }}"
+        - "{{ python_dir }}"
+
+    # Step 2: Check if Python is already built
+    - name: Check if custom Python is already installed
+      stat:
+        path: "{{ python_dir }}/bin/python3"
+      register: custom_python
+
+    # Step 3: Install Python from source
+    - name: Download Python source
+      get_url:
+        url: "{{ python_source_url }}"
+        dest: "{{ build_dir }}/Python-{{ python_version }}.tar.xz"
+        mode: '0644'
+      when: not custom_python.stat.exists
+
+    - name: Extract Python source
+      unarchive:
+        src: "{{ build_dir }}/Python-{{ python_version }}.tar.xz"
+        dest: "{{ build_dir }}"
+        remote_src: yes
+      when: not custom_python.stat.exists
+
+    - name: Install build dependencies (requires temporary root)
+      become: yes
+      package:
+        name:
+          - make
+          - gcc
+          - zlib1g-dev
+          - libssl-dev
+          - libffi-dev
+          - libsqlite3-dev
+          - libreadline-dev
+        state: present
+      when: not custom_python.stat.exists
+
+    - name: Configure Python build
+      command: ./configure --prefix={{ python_dir }} --enable-optimizations
+      args:
+        chdir: "{{ build_dir }}/Python-{{ python_version }}"
+        creates: "{{ build_dir }}/Python-{{ python_version }}/Makefile"
+      when: not custom_python.stat.exists
+
+    - name: Compile and install Python
+      shell: make -j$(nproc) && make install
+      args:
+        chdir: "{{ build_dir }}/Python-{{ python_version }}"
+        creates: "{{ python_dir }}/bin/python3"
+      when: not custom_python.stat.exists
+
+    # Step 4: Create virtual environment
+    - name: Check if virtual environment exists
+      stat:
+        path: "{{ venv_dir }}/bin/activate"
+      register: venv_exists
+
+    - name: Create virtual environment with custom Python
+      command: "{{ python_dir }}/bin/python3 -m venv {{ venv_dir }}"
+      when: not venv_exists.stat.exists and not use_cx_oracle
+
+    # Alternative: Use system Python 3.6 with cx_Oracle
+    - name: Get system Python version
+      command: python3 -c "import sys; print('{}.{}'.format(sys.version_info.major, sys.version_info.minor))"
+      register: sys_python_version
       changed_when: false
+      when: use_cx_oracle
 
-    - name: Set Python version facts
+    - name: Create virtual environment with system Python
+      command: python3 -m venv {{ venv_dir }}
+      when: use_cx_oracle and not venv_exists.stat.exists
+
+    # Step 5: Configure pip with Artifactory (if credentials provided)
+    - name: Check if Artifactory credentials are provided
       set_fact:
-        python_major: "{{ python_version.stdout.split()[0] }}"
-        python_minor: "{{ python_version.stdout.split()[1] }}"
+        use_artifactory: "{{ artifactory_user != '' and artifactory_password != '' }}"
 
-    - name: Show current Python version
-      debug:
-        msg: "Current Python version: {{ python_major }}.{{ python_minor }}"
+    - name: Create pip.conf with Artifactory configuration
+      copy:
+        dest: "{{ venv_dir }}/pip.conf"
+        content: |
+          [global]
+          index-url = https://{{ artifactory_user }}:{{ artifactory_password }}@{{ artifactory_url.replace('https://', '') }}/{{ artifactory_repo }}/simple
+          trusted-host = {{ artifactory_url.replace('https://', '').split('/')[0] }}
+        mode: '0600'
+      when: use_artifactory
 
-    # Approach 1: Use cx_Oracle with existing Python 3.6
-    - name: Setup cx_Oracle with existing Python 3.6
-      when: use_cx_oracle | bool
-      block:
-        - name: Create virtual environment with existing Python
-          command: python3 -m venv {{ venv_dir }}
-          args:
-            creates: "{{ venv_dir }}/bin/activate"
+    # Step 6: Install Oracle packages
+    - name: Install oracledb package
+      pip:
+        name: oracledb
+        virtualenv: "{{ venv_dir }}"
+      when: not use_cx_oracle
 
-        - name: Create pip.conf with Artifactory credentials
-          copy:
-            dest: "{{ venv_dir }}/pip.conf"
-            content: |
-              [global]
-              index-url = https://{{ artifactory_user }}:{{ artifactory_password }}@{{ artifactory_url.replace('https://', '') }}/{{ artifactory_repo }}/simple
-              trusted-host = {{ artifactory_url.replace('https://', '').split('/')[0] }}
-            mode: '0600'
+    - name: Install cx_Oracle package
+      pip:
+        name: cx_Oracle<8.4.0  # Last versions that support Python 3.6
+        virtualenv: "{{ venv_dir }}"
+      when: use_cx_oracle
 
-        - name: Install cx_Oracle from Artifactory
-          pip:
-            name: cx_Oracle=={{ cx_oracle_version }}
-            virtualenv: "{{ venv_dir }}"
-            extra_args: "--no-cache-dir"
+    # Step 7: Create activation script
+    - name: Create Oracle environment activation script
+      copy:
+        dest: "{{ ansible_env.HOME }}/activate_oracle_env.sh"
+        content: |
+          #!/bin/bash
+          source {{ venv_dir }}/bin/activate
+          
+          # Set Oracle environment variables if needed
+          # export ORACLE_HOME=/path/to/oracle
+          # export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
+          
+          {% if not use_cx_oracle %}
+          echo "Oracle Python environment activated with oracledb on Python {{ python_version }}."
+          {% else %}
+          echo "Oracle Python environment activated with cx_Oracle on system Python {{ sys_python_version.stdout }}."
+          {% endif %}
+        mode: '0755'
 
-        - name: Create Oracle environment activation script
-          copy:
-            dest: "{{ ansible_env.HOME }}/activate_oracle_env.sh"
-            content: |
-              #!/bin/bash
-              source {{ venv_dir }}/bin/activate
-              
-              # Set Oracle environment variables if needed
-              # export ORACLE_HOME=/path/to/oracle
-              # export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
-              
-              echo "Oracle Python environment activated with cx_Oracle {{ cx_oracle_version }}."
-              echo "Compatible with your Python {{ python_major }}.{{ python_minor }}."
-            mode: '0755'
-
-    # Approach 2: Install Python 3.8+ from Artifactory
-    - name: Setup newer Python with oracledb
-      when: not use_cx_oracle | bool
-      block:
-        - name: Create directory for new Python installation
-          file:
-            path: "{{ ansible_env.HOME }}/python3.8"
-            state: directory
-            mode: '0755'
-
-        - name: Download Python 3.8+ from Artifactory
-          get_url:
-            url: "{{ artifactory_url }}/{{ artifactory_repo }}/python-3.8.16-linux-x86_64.tar.gz"
-            dest: "{{ ansible_env.HOME }}/python3.8.tar.gz"
-            username: "{{ artifactory_user }}"
-            password: "{{ artifactory_password }}"
-            mode: '0644'
-            force: no
-
-        - name: Extract Python package
-          unarchive:
-            src: "{{ ansible_env.HOME }}/python3.8.tar.gz"
-            dest: "{{ ansible_env.HOME }}/python3.8"
-            remote_src: yes
-            creates: "{{ ansible_env.HOME }}/python3.8/bin/python3"
-
-        - name: Create virtual environment with Python 3.8
-          command: "{{ ansible_env.HOME }}/python3.8/bin/python3 -m venv {{ venv_dir }}"
-          args:
-            creates: "{{ venv_dir }}/bin/activate"
-
-        - name: Create pip.conf with Artifactory credentials
-          copy:
-            dest: "{{ venv_dir }}/pip.conf"
-            content: |
-              [global]
-              index-url = https://{{ artifactory_user }}:{{ artifactory_password }}@{{ artifactory_url.replace('https://', '') }}/{{ artifactory_repo }}/simple
-              trusted-host = {{ artifactory_url.replace('https://', '').split('/')[0] }}
-            mode: '0600'
-
-        - name: Install oracledb from Artifactory
-          pip:
-            name: oracledb
-            virtualenv: "{{ venv_dir }}"
-            extra_args: "--no-cache-dir"
-
-        - name: Create Oracle environment activation script
-          copy:
-            dest: "{{ ansible_env.HOME }}/activate_oracle_env.sh"
-            content: |
-              #!/bin/bash
-              source {{ venv_dir }}/bin/activate
-              
-              # Set Oracle environment variables if needed
-              # export ORACLE_HOME=/path/to/oracle
-              # export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
-              
-              echo "Oracle Python environment activated with oracledb using Python 3.8+."
-            mode: '0755'
-
-    # Common configuration
     - name: Add environment shortcut to .bashrc
       lineinfile:
         path: "{{ ansible_env.HOME }}/.bashrc"
         line: 'alias activate_oracle="source {{ ansible_env.HOME }}/activate_oracle_env.sh"'
         state: present
+
+    # Optional: Clean up build files to save space
+    - name: Clean up build files (optional)
+      file:
+        path: "{{ build_dir }}/Python-{{ python_version }}"
+        state: absent
+      when: custom_python.stat.exists  # Only clean up if Python is already built
