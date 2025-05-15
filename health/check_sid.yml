@@ -13,7 +13,7 @@
   when: sid_entry.split(':')[1] == ''
 
 - name: Check database status
-  shell: "{{ oracle_output_dir }}/check_oracle_db.py {{ current_sid }} {{ current_oracle_home }}"
+  shell: "{{ python_venv }}/bin/python {{ oracle_output_dir }}/check_oracle_db.py {{ current_sid }} {{ current_oracle_home }}"
   register: db_check_result
   failed_when: false
   changed_when: false
@@ -30,7 +30,7 @@
   when: sid_entry.split(':')[1] != '' and db_check_result.rc != 0
 
 - name: Discover listeners for this ORACLE_HOME
-  shell: "{{ oracle_output_dir }}/discover_listeners.py {{ current_oracle_home }}"
+  shell: "{{ python_venv }}/bin/python {{ oracle_output_dir }}/discover_listeners.py {{ current_oracle_home }}"
   register: listener_discovery_result
   failed_when: false
   changed_when: false
@@ -42,7 +42,7 @@
   when: sid_entry.split(':')[1] != '' and listener_discovery_result.rc == 0
 
 - name: Check listener status for each discovered listener
-  shell: "{{ oracle_output_dir }}/check_oracle_listener.py {{ item }} {{ current_oracle_home }}"
+  shell: "{{ python_venv }}/bin/python {{ oracle_output_dir }}/check_oracle_listener.py {{ item }} {{ current_oracle_home }}"
   register: listener_check_result
   failed_when: false
   changed_when: false
