@@ -638,300 +638,200 @@ class ConsolidatedHTMLReportGenerator:
         except (ValueError, TypeError):
             return "status-error"
 
-    @staticmethod
-    def generate_consolidated_report(all_db_info, all_listener_info=None):
-        """
-        Generate a consolidated HTML report for multiple databases
+@staticmethod
+def generate_consolidated_report(all_db_info, all_listener_info=None):
+    """
+    Generate a consolidated HTML report for multiple databases
 
-        Args:
-            all_db_info (list): List of database information dictionaries
-            all_listener_info (list): Optional list of listener information dictionaries
+    Args:
+        all_db_info (list): List of database information dictionaries
+        all_listener_info (list): Optional list of listener information dictionaries
 
-        Returns:
-            str: HTML report content
-        """
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        hostname = os.uname().nodename
+    Returns:
+        str: HTML report content
+    """
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    hostname = os.uname().nodename
 
-        # Generate database summary section
-        db_summary_rows = ""
-        for db in all_db_info:
-            # Skip databases that couldn't be accessed
-            if db.get("accessible") is False:
-                db_summary_rows += f"""
-                <tr>
-                    <td>{db.get("sid")}</td>
-                    <td class="status-error">NOT ACCESSIBLE</td>
-                    <td>N/A</td>
-                    <td>N/A</td>
-                    <td>N/A</td>
-                    <td>N/A</td>
-                </tr>
-                """
-                continue
+    # Generate summary table for databases
+    db_summary_rows = ""
+    db_detail_sections = ""
 
-            instance_name = db.get("instance", {}).get("INSTANCE_NAME", "UNKNOWN")
-            db_role = db.get("role", {}).get("DATABASE_ROLE", "UNKNOWN")
-            db_open_mode = db.get("role", {}).get("OPEN_MODE", "UNKNOWN")
-            instance_status = db.get("instance", {}).get("STATUS", "UNKNOWN")
-            db_version = db.get("version", {}).get("version", "UNKNOWN")
-
-            # Determine status class
-            is_primary = db_role == "PRIMARY"
-            status_class = "status-good" if instance_status == "OPEN" else "status-error"
-            open_mode_class = ConsolidatedHTMLReportGenerator._get_open_mode_class(db_open_mode, is_primary)
-
-            # Get standby lag if applicable
-            lag_display = "N/A"
-            if not is_primary:
-                lag_minutes = db.get("standby_info", {}).get("lag_minutes", "UNKNOWN")
-                lag_class = ConsolidatedHTMLReportGenerator._get_lag_class(lag_minutes)
-                lag_display = f'<span class="{lag_class}">{lag_minutes} min</span>'
-
+    for db in all_db_info:
+        sid = db.get("sid")
+        if db.get("accessible") is False:
             db_summary_rows += f"""
             <tr>
-                <td><a href="#db-{db.get('sid')}">{instance_name}</a></td>
-                <td>{db_role}</td>
-                <td class="{open_mode_class}">{db_open_mode}</td>
-                <td class="{status_class}">{instance_status}</td>
-                <td>{lag_display}</td>
-                <td>{db_version}</td>
+                <td>{sid}</td>
+                <td class="status-error">NOT ACCESSIBLE</td>
+                <td>N/A</td>
+                <td>N/A</td>
+                <td>N/A</td>
+                <td>N/A</td>
             </tr>
             """
+            continue
 
-        # Generate listener summary section
-        listener_summary_rows = ""
-        if all_listener_info:
-            for listener_group in all_listener_info:
-                oracle_home = listener_group.get("oracle_home", "UNKNOWN")
-                for listener in listener_group.get("listeners", []):
-                    listener_name = listener.get("name", "UNKNOWN")
-                    listener_status = listener.get("status", "DOWN")
-                    status_class = "status-good" if listener_status == "UP" else "status-error"
+        instance = db.get("instance", {})
+        role = db.get("role", {})
+        version = db.get("version", {}).get("version", "UNKNOWN")
+        status = instance.get("STATUS", "UNKNOWN")
+        open_mode = role.get("OPEN_MODE", "UNKNOWN")
+        db_role = role.get("DATABASE_ROLE", "UNKNOWN")
+        instance_name = instance.get("INSTANCE_NAME", sid)
 
-                    # Get service count
-                    service_count = len(listener.get("services", []))
+        is_primary = db_role == "PRIMARY"
+        status_class = "status-good" if status == "OPEN" else "status-error"
+        open_mode_class = ConsolidatedHTMLReportGenerator._get_open_mode_class(open_mode, is_primary)
 
-                    listener_summary_rows += f"""
-                    <tr>
-                        <td><a href="#listener-{listener_name}-{oracle_home.replace('/', '_')}">{listener_name}</a></td>
-                        <td class="{status_class}">{listener_status}</td>
-                        <td>{service_count}</td>
-                        <td>{oracle_home}</td>
-                    </tr>
-                    """
+        # Lag display
+        lag_display = "N/A"
+        if not is_primary:
+            lag_minutes = db.get("standby_info", {}).get("lag_minutes", "UNKNOWN")
+            lag_class = ConsolidatedHTMLReportGenerator._get_lag_class(lag_minutes)
+            lag_display = f'<span class="{lag_class}">{lag_minutes} min</span>'
 
-        # Generate individual database details sections
-        db_detail_sections = ""
-        for db in all_db_info:
-            sid = db.get("sid")
-
-            # Skip databases that couldn't be accessed
-            if db.get("accessible") is False:
-                db_detail_sections += f"""
-                <div id="db-{sid}" class="section">
-                    <h2>Database: {sid}</h2>
-                    <div class="card">
-                        <h3>Status</h3>
-                        <p class="status-error">Database is not accessible or not running</p>
-                    </div>
-                </div>
-                <hr>
-                """
-                continue
-
-            instance_name = db.get("instance", {}).get("INSTANCE_NAME", "UNKNOWN")
-            db_role = db.get("role", {}).get("DATABASE_ROLE", "UNKNOWN")
-            db_open_mode = db.get("role", {}).get("OPEN_MODE", "UNKNOWN")
-            instance_status = db.get("instance", {}).get("STATUS", "UNKNOWN")
-            db_status = db.get("instance", {}).get("DATABASE_STATUS", "UNKNOWN")
-            active_connections = db.get("connections", {}).get("ACTIVE_CONNECTIONS", "UNKNOWN")
-            db_version = db.get("version", {}).get("version", "UNKNOWN")
-            oracle_home = db.get("oracle_home", "UNKNOWN")
-
-            # Determine status class
-            is_primary = db_role == "PRIMARY"
-            status_class = "status-good" if instance_status == "OPEN" else "status-error"
-            open_mode_class = ConsolidatedHTMLReportGenerator._get_open_mode_class(db_open_mode, is_primary)
-            db_status_class = "status-good" if db_status == "ACTIVE" else "status-error"
-
-            # Standby specific information
-            standby_card = ""
-            if not is_primary:
-                mrp_status = db.get("standby_info", {}).get("mrp", {}).get("status", "UNKNOWN")
-                mrp_running = db.get("standby_info", {}).get("mrp", {}).get("running", False)
-                lag_minutes = db.get("standby_info", {}).get("lag_minutes", "UNKNOWN")
-                last_applied = db.get("standby_info", {}).get("last_applied", "UNKNOWN")
-
-                mrp_class = "status-good" if mrp_running else "status-error"
-                lag_class = ConsolidatedHTMLReportGenerator._get_lag_class(lag_minutes)
-
-                standby_card = f"""
-                <div class="card">
-                    <h3>Standby Status</h3>
-                    <table>
-                        <tr>
-                            <th>MRP Status</th>
-                            <td class="{mrp_class}">{mrp_status}</td>
-                        </tr>
-                        <tr>
-                            <th>Apply Lag (minutes)</th>
-                            <td class="{lag_class}">{lag_minutes}</td>
-                        </tr>
-                        <tr>
-                            <th>Last Applied Time</th>
-                            <td>{last_applied}</td>
-                        </tr>
-                    </table>
-                </div>
-                """
-
-            # Tablespace information
-            tablespaces = db.get("tablespaces", [])
-            tablespace_table = ""
-
-            if tablespaces:
-                tablespace_rows = ""
-                for ts in tablespaces:
-                    tablespace_name = ts.get("TABLESPACE_NAME", "UNKNOWN")
-                    size_mb = ts.get("SIZE_MB", "0")
-                    free_mb = ts.get("FREE_MB", "0")
-                    used_pct = ts.get("USED_PCT", "0")
-
-                    # Determine color based on usage percentage
-                    used_class = ConsolidatedHTMLReportGenerator._get_usage_class(used_pct)
-
-                    tablespace_rows += f"""
-                    <tr>
-                        <td>{tablespace_name}</td>
-                        <td>{size_mb} MB</td>
-                        <td>{free_mb} MB</td>
-                        <td class="{used_class}">{used_pct}%</td>
-                    </tr>
-                    """
-
-                tablespace_table = f"""
-                <div class="card full-width">
-                    <h3>Tablespace Status</h3>
-                    <table>
-                        <tr>
-                            <th>Tablespace Name</th>
-                            <th>Size (MB)</th>
-                            <th>Free (MB)</th>
-                            <th>Used (%)</th>
-                        </tr>
-                        {tablespace_rows}
-                    </table>
-                </div>
-                """
-
-            # Build the complete database detail section
-            return f"""
-            <html>
-            <head>
-                <title>Oracle Database Status Report</title>
-                <style>
-                    body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                    table {{ border-collapse: collapse; width: 100%; }}
-                    th, td {{ border: 1px solid #ccc; padding: 8px; text-align: left; }}
-                    th {{ background-color: #f2f2f2; }}
-                    .status-good {{ background-color: #c8e6c9; }}
-                    .status-warning {{ background-color: #fff9c4; }}
-                    .status-error {{ background-color: #ffcdd2; }}
-                    .card {{ border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; border-radius: 5px; }}
-                    .full-width {{ width: 100%; }}
-                </style>
-            </head>
-            <body>
-                <h1>Oracle Database Status Report</h1>
-                <p><strong>Host:</strong> {hostname}</p>
-                <p><strong>Generated At:</strong> {timestamp}</p>
-
-                <h2>Database Summary</h2>
-                <table>
-                    <tr>
-                        <th>SID</th>
-                        <th>Role</th>
-                        <th>Open Mode</th>
-                        <th>Status</th>
-                        <th>Lag</th>
-                        <th>Version</th>
-                    </tr>
-                    {db_summary_rows}
-                </table>
-
-                <h2>Listener Summary</h2>
-                <table>
-                    <tr>
-                        <th>Listener</th>
-                        <th>Status</th>
-                        <th>Services</th>
-                        <th>ORACLE_HOME</th>
-                    </tr>
-                    {listener_summary_rows}
-                </table>
-
-                <hr>
-                <h2>Database Details</h2>
-                {db_detail_sections}
-
-            </body>
-            </html>
-            """
-
-        return f"""
-        <html>
-        <head>
-            <title>Oracle Database Status Report</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                table {{ border-collapse: collapse; width: 100%; }}
-                th, td {{ border: 1px solid #ccc; padding: 8px; text-align: left; }}
-                th {{ background-color: #f2f2f2; }}
-                .status-good {{ background-color: #c8e6c9; }}
-                .status-warning {{ background-color: #fff9c4; }}
-                .status-error {{ background-color: #ffcdd2; }}
-                .card {{ border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; border-radius: 5px; }}
-                .full-width {{ width: 100%; }}
-            </style>
-        </head>
-        <body>
-            <h1>Oracle Database Status Report</h1>
-            <p><strong>Host:</strong> {hostname}</p>
-            <p><strong>Generated At:</strong> {timestamp}</p>
-
-            <h2>Database Summary</h2>
-            <table>
-                <tr>
-                    <th>SID</th>
-                    <th>Role</th>
-                    <th>Open Mode</th>
-                    <th>Status</th>
-                    <th>Lag</th>
-                    <th>Version</th>
-                </tr>
-                {db_summary_rows}
-            </table>
-
-            <h2>Listener Summary</h2>
-            <table>
-                <tr>
-                    <th>Listener</th>
-                    <th>Status</th>
-                    <th>Services</th>
-                    <th>ORACLE_HOME</th>
-                </tr>
-                {listener_summary_rows}
-            </table>
-
-            <hr>
-            <h2>Database Details</h2>
-            {db_detail_sections}
-
-        </body>
-        </html>
+        db_summary_rows += f"""
+        <tr>
+            <td><a href="#db-{sid}">{instance_name}</a></td>
+            <td>{db_role}</td>
+            <td class="{open_mode_class}">{open_mode}</td>
+            <td class="{status_class}">{status}</td>
+            <td>{lag_display}</td>
+            <td>{version}</td>
+        </tr>
         """
 
+        # --- Database details section ---
+        db_status = instance.get("DATABASE_STATUS", "UNKNOWN")
+        db_status_class = "status-good" if db_status == "ACTIVE" else "status-error"
+
+        # Standby info block
+        standby_html = ""
+        if not is_primary:
+            standby_info = db.get("standby_info", {})
+            mrp = standby_info.get("mrp", {})
+            mrp_status = mrp.get("status", "UNKNOWN")
+            mrp_class = "status-good" if mrp.get("running", False) else "status-error"
+            lag = standby_info.get("lag_minutes", "UNKNOWN")
+            lag_class = ConsolidatedHTMLReportGenerator._get_lag_class(lag)
+            last_applied = standby_info.get("last_applied", "UNKNOWN")
+
+            standby_html = f"""
+            <div class="card">
+                <h3>Standby Status</h3>
+                <table>
+                    <tr><th>MRP Status</th><td class="{mrp_class}">{mrp_status}</td></tr>
+                    <tr><th>Apply Lag</th><td class="{lag_class}">{lag} minutes</td></tr>
+                    <tr><th>Last Applied</th><td>{last_applied}</td></tr>
+                </table>
+            </div>
+            """
+
+        # Tablespaces
+        tablespace_html = ""
+        if "tablespaces" in db:
+            rows = ""
+            for ts in db["tablespaces"]:
+                used_pct = ts.get("USED_PCT", "0")
+                used_class = ConsolidatedHTMLReportGenerator._get_usage_class(used_pct)
+                rows += f"""
+                <tr>
+                    <td>{ts.get("TABLESPACE_NAME", "UNKNOWN")}</td>
+                    <td>{ts.get("SIZE_MB", "0")} MB</td>
+                    <td>{ts.get("FREE_MB", "0")} MB</td>
+                    <td class="{used_class}">{used_pct}%</td>
+                </tr>
+                """
+            tablespace_html = f"""
+            <div class="card">
+                <h3>Tablespace Usage</h3>
+                <table>
+                    <tr><th>Name</th><th>Size</th><th>Free</th><th>Used %</th></tr>
+                    {rows}
+                </table>
+            </div>
+            """
+
+        connections = db.get("connections", {}).get("active_connections", "UNKNOWN")
+
+        db_detail_sections += f"""
+        <div class="card full-width" id="db-{sid}">
+            <h2>{sid} - Details</h2>
+            <p><strong>Instance:</strong> {instance_name}</p>
+            <p><strong>Status:</strong> <span class="{status_class}">{status}</span></p>
+            <p><strong>Database Status:</strong> <span class="{db_status_class}">{db_status}</span></p>
+            <p><strong>Role:</strong> {db_role}</p>
+            <p><strong>Open Mode:</strong> {open_mode}</p>
+            <p><strong>Version:</strong> {version}</p>
+            <p><strong>Active Connections:</strong> {connections}</p>
+            {standby_html}
+            {tablespace_html}
+        </div>
+        """
+
+    # --- Listener summary ---
+    listener_summary_rows = ""
+    if all_listener_info:
+        for l in all_listener_info:
+            for listener in l.get("listeners", []):
+                status_class = "status-good" if listener.get("status") == "UP" else "status-error"
+                services = "<br>".join(
+                    [s.get("name", "") for s in listener.get("services", [])]
+                )
+                listener_summary_rows += f"""
+                <tr>
+                    <td><a href="#listener-{listener['name']}">{listener['name']}</a></td>
+                    <td class="{status_class}">{listener['status']}</td>
+                    <td>{services}</td>
+                    <td>{l['oracle_home']}</td>
+                </tr>
+                """
+
+    # --- Final HTML ---
+    return f"""
+    <html>
+    <head>
+        <title>Oracle Database Status Report</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            table {{ border-collapse: collapse; width: 100%; }}
+            th, td {{ border: 1px solid #ccc; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
+            .status-good {{ background-color: #c8e6c9; }}
+            .status-warning {{ background-color: #fff9c4; }}
+            .status-error {{ background-color: #ffcdd2; }}
+            .card {{ border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; border-radius: 5px; }}
+            .full-width {{ width: 100%; }}
+        </style>
+    </head>
+    <body>
+        <h1>Oracle Database Status Report</h1>
+        <p><strong>Host:</strong> {hostname}</p>
+        <p><strong>Generated At:</strong> {timestamp}</p>
+
+        <h2>Database Summary</h2>
+        <table>
+            <tr>
+                <th>SID</th><th>Role</th><th>Open Mode</th><th>Status</th><th>Lag</th><th>Version</th>
+            </tr>
+            {db_summary_rows}
+        </table>
+
+        <h2>Listener Summary</h2>
+        <table>
+            <tr>
+                <th>Listener</th><th>Status</th><th>Services</th><th>ORACLE_HOME</th>
+            </tr>
+            {listener_summary_rows}
+        </table>
+
+        <hr>
+        <h2>Database Details</h2>
+        {db_detail_sections}
+    </body>
+    </html>
+    """
 
 
 def main():
