@@ -1,0 +1,65 @@
+venv_dir: /tmp/oracle_health_venv
+script_path: "{{ role_path }}/files/codbcr-in.py"
+
+- name: Find available Python versions in /bin
+  find:
+    paths: /bin
+    patterns: "^python3\\.[0-9]+$"
+    use_regex: yes
+    file_type: file
+  register: python_binaries
+
+- name: Select the highest Python version
+  set_fact:
+    selected_python: "{{ python_binaries.files | map(attribute='path') | sort | last }}"
+
+- name: Ensure python3-virtualenv is installed
+  package:
+    name: python3-virtualenv
+    state: present
+  become: true
+
+- name: Create virtual environment
+  command: "{{ selected_python }} -m venv {{ venv_dir }}"
+  args:
+    creates: "{{ venv_dir }}/bin/activate"
+
+- name: Install Python packages (optional)
+  pip:
+    requirements: "{{ script_path | dirname }}/requirements.txt"
+    virtualenv: "{{ venv_dir }}"
+  ignore_errors: yes
+
+- name: Run the Oracle health check script
+  command: "{{ venv_dir }}/bin/python {{ script_path }}"
+  environment:
+    ORACLE_HOME: "{{ oracle_home | default(omit) }}"
+    ORACLE_SID: "{{ oracle_sid | default(omit) }}"
+
+- name: Find generated HTML report on remote host
+  shell: ls -1t /tmp/oracle_status_report_*.html | head -n 1
+  register: report_path_result
+  changed_when: false
+
+- name: Set fact for remote report path
+  set_fact:
+    remote_report_path: "{{ report_path_result.stdout }}"
+
+- name: Copy HTML report to control machine
+  fetch:
+    src: "{{ remote_report_path }}"
+    dest: "{{ playbook_dir }}/reports/"
+    flat: yes
+  register: fetched_report
+
+- name: Set fact for local report path
+  set_fact:
+    local_report_path: "{{ fetched_report.dest }}"
+
+- name: Email the report using local script
+  delegate_to: localhost
+  run_once: true
+  command: >
+    python3 ./email_report.py
+    --subject "Oracle Health Report"
+    --attach "{{ local_report_path }}"
