@@ -824,6 +824,59 @@ class ConsolidatedHTMLReportGenerator:
                 """
 
             # Build the complete database detail section
+            return f"""
+            <html>
+            <head>
+                <title>Oracle Database Status Report</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                    table {{ border-collapse: collapse; width: 100%; }}
+                    th, td {{ border: 1px solid #ccc; padding: 8px; text-align: left; }}
+                    th {{ background-color: #f2f2f2; }}
+                    .status-good {{ background-color: #c8e6c9; }}
+                    .status-warning {{ background-color: #fff9c4; }}
+                    .status-error {{ background-color: #ffcdd2; }}
+                    .card {{ border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; border-radius: 5px; }}
+                    .full-width {{ width: 100%; }}
+                </style>
+            </head>
+            <body>
+                <h1>Oracle Database Status Report</h1>
+                <p><strong>Host:</strong> {hostname}</p>
+                <p><strong>Generated At:</strong> {timestamp}</p>
+
+                <h2>Database Summary</h2>
+                <table>
+                    <tr>
+                        <th>SID</th>
+                        <th>Role</th>
+                        <th>Open Mode</th>
+                        <th>Status</th>
+                        <th>Lag</th>
+                        <th>Version</th>
+                    </tr>
+                    {db_summary_rows}
+                </table>
+
+                <h2>Listener Summary</h2>
+                <table>
+                    <tr>
+                        <th>Listener</th>
+                        <th>Status</th>
+                        <th>Services</th>
+                        <th>ORACLE_HOME</th>
+                    </tr>
+                    {listener_summary_rows}
+                </table>
+
+                <hr>
+                <h2>Database Details</h2>
+                {db_detail_sections}
+
+            </body>
+            </html>
+            """
+
 
 def main():
     parser = OratabParser()
