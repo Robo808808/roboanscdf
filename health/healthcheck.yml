@@ -57,16 +57,14 @@ script_path: "{{ role_path }}/files/codbcr-in.py"
   set_fact:
     local_report_path: "{{ fetched_report.dest }}"
 
-- name: Gather host metadata
+- name: Gather host metadata and save to file
   shell: |
-    echo "hostname={{ ansible_hostname }}"
-    echo "os={{ ansible_distribution }} {{ ansible_distribution_version }}"
-    echo "kernel={{ ansible_kernel }}"
-    echo "uptime={{ uptime_output }}"
-  vars:
-    uptime_output: "{{ lookup('pipe', 'uptime -p') }}"
-  register: host_meta
-  changed_when: false
+    {
+      echo "hostname={{ ansible_hostname }}"
+      echo "os={{ ansible_distribution }} {{ ansible_distribution_version }}"
+      echo "kernel={{ ansible_kernel }}"
+      echo "uptime={{ lookup('pipe', 'uptime -p') }}"
+    } > {{ venv_dir }}/report_meta.txt
 
 - name: Save metadata to file for inclusion in report summary
   copy:
