@@ -824,3 +824,66 @@ class ConsolidatedHTMLReportGenerator:
                 """
 
             # Build the complete database detail section
+
+def main():
+    parser = OratabParser()
+    db_entries = parser.get_database_entries()
+
+    all_db_info = []
+    listener_info_by_home = {}
+
+    for entry in db_entries:
+        sid = entry["sid"]
+        oracle_home = entry["oracle_home"]
+        db_info = {
+            "sid": sid,
+            "oracle_home": oracle_home
+        }
+
+        try:
+            oracle = OracleRunner(oracle_home=oracle_home, oracle_sid=sid)
+            if not oracle.is_database_accessible():
+                db_info["accessible"] = False
+                all_db_info.append(db_info)
+                continue
+
+            db_info["accessible"] = True
+            db_info["instance"] = oracle.get_instance_status()
+            db_info["role"] = oracle.is_primary_or_standby()
+            db_info["version"] = oracle.get_db_version()
+            db_info["connections"] = oracle.get_database_connections()
+            db_info["tablespaces"] = oracle.get_tablespaces_status()
+
+            if db_info["role"].get("DATABASE_ROLE") != "PRIMARY":
+                db_info["standby_info"] = oracle.get_standby_apply_lag()
+
+        except Exception as e:
+            db_info["accessible"] = False
+            db_info["error"] = str(e)
+
+        all_db_info.append(db_info)
+
+        # Listener checking (once per ORACLE_HOME)
+        if oracle_home not in listener_info_by_home:
+            listener_checker = ListenerChecker(oracle_home=oracle_home)
+            listeners = listener_checker.check_all_listeners()
+            listener_info_by_home[oracle_home] = {
+                "oracle_home": oracle_home,
+                "listeners": listeners
+            }
+
+    # Generate HTML report
+    report = ConsolidatedHTMLReportGenerator.generate_consolidated_report(
+        all_db_info,
+        list(listener_info_by_home.values())
+    )
+
+    # Write to output file
+    output_path = f"/tmp/oracle_status_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    with open(output_path, "w") as f:
+        f.write(report)
+
+    print(f"Report written to: {output_path}")
+
+if __name__ == "__main__":
+    main()
