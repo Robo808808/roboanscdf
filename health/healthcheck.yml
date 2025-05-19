@@ -5,7 +5,7 @@ script_path: "{{ role_path }}/files/codbcr-in.py"
   find:
     paths: /bin
     patterns: "^python3\\.[0-9]+$"
-    use_regex: yes
+    use_regex: true
     file_type: file
   register: python_binaries
 
@@ -13,22 +13,23 @@ script_path: "{{ role_path }}/files/codbcr-in.py"
   set_fact:
     selected_python: "{{ python_binaries.files | map(attribute='path') | sort | last }}"
 
-- name: Ensure python3-virtualenv is installed
-  package:
-    name: python3-virtualenv
-    state: present
-  become: true
+- name: Check if venv module is available
+  command: "{{ selected_python }} -m venv --help"
+  register: venv_check
+  changed_when: false
+  ignore_errors: true
+
+- name: Fail if venv not available
+  fail:
+    msg: >
+      Python venv module is not available in {{ selected_python }}.
+      Please ensure the python3-venv package is installed.
+  when: venv_check.rc != 0
 
 - name: Create virtual environment
   command: "{{ selected_python }} -m venv {{ venv_dir }}"
   args:
     creates: "{{ venv_dir }}/bin/activate"
-
-- name: Install Python packages (optional)
-  pip:
-    requirements: "{{ script_path | dirname }}/requirements.txt"
-    virtualenv: "{{ venv_dir }}"
-  ignore_errors: yes
 
 - name: Run the Oracle health check script
   command: "{{ venv_dir }}/bin/python {{ script_path }}"
