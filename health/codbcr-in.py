@@ -304,19 +304,30 @@ class OracleRunner:
                 "client_process": mrp_results[0].get("CLIENT_PROCESS", "UNKNOWN")
             }
 
-        # Get apply lag information
+        # Get apply lag using v$dataguard_stats
         lag_query = """
-        SELECT ROUND((SYSDATE - SCN_TO_TIMESTAMP(CURRENT_SCN))*24*60,1) as lag_minutes
-        FROM V$DATABASE;
+        SELECT VALUE as lag_value
+        FROM v$dataguard_stats
+        WHERE NAME = 'apply lag';
         """
         lag_results = self.execute_query_as_dict(lag_query)
         lag_minutes = "UNKNOWN"
 
         if lag_results:
             try:
-                lag_minutes = lag_results[0].get("LAG_MINUTES", "UNKNOWN")
-            except:
-                lag_minutes = "ERROR CALCULATING"
+                val = lag_results[0].get("LAG_VALUE", "").lower()
+                if "minute" in val:
+                    lag_minutes = re.findall(r'\d+', val)[0]
+                elif "second" in val:
+                    seconds = int(re.findall(r'\d+', val)[0])
+                    lag_minutes = round(seconds / 60, 1)
+                elif "hour" in val:
+                    hours = int(re.findall(r'\d+', val)[0])
+                    lag_minutes = hours * 60
+                else:
+                    lag_minutes = val
+            except Exception as e:
+                lag_minutes = "PARSE_ERROR"
 
         # Get last applied archive log time
         last_applied_query = """
