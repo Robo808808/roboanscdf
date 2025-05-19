@@ -623,12 +623,11 @@ class ConsolidatedHTMLReportGenerator:
 
     @staticmethod
     def _get_lag_class(lag_minutes):
-        """Determine CSS class for standby lag"""
         try:
             lag = float(lag_minutes)
-            if lag <= 5:
+            if lag < 30:
                 return "status-good"
-            elif lag <= 30:
+            elif lag < 60:
                 return "status-warning"
             else:
                 return "status-error"
