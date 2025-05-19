@@ -1,388 +1,939 @@
 #!/usr/bin/env python3
 """
-oracle_db_status_checker.py
-===========================
-Consolidated Oracle DB & Listener status report.
-
-Features
---------
-* Reads oratab to discover every SID / ORACLE_HOME.
-* Runs sqlplus checks with a timeout (default 30 s) to avoid hangs.
-* Runs lsnrctl status with the same timeout.
-* Generates colour-coded HTML in /tmp/oracle_status_report_<timestamp>.html.
-* Optional --debug flag prints progress.
+Consolidated Oracle DB Status Check - Checks all Oracle databases and listeners
+defined in the oratab file and generates a consolidated HTML report.
 """
 
-from __future__ import annotations
-
-import argparse
-import csv
-import datetime as _dt
 import os
-import re
+import sys
 import subprocess
 import tempfile
+import csv
+import json
+import datetime
+import re
 from pathlib import Path
-from typing import Dict, List, Optional
 
-DEFAULT_TIMEOUT = 30  # seconds
 
-###############################################################################
-# 1. CLI args
-###############################################################################
-def parse_args():
-    p = argparse.ArgumentParser(description="Oracle DB & Listener status checker")
-    p.add_argument("--oratab", help="Path to oratab (optional)")
-    p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="sqlplus / lsnrctl timeout (s)")
-    p.add_argument("--debug", action="store_true", help="Verbose debug output")
-    return p.parse_args()
-
-###############################################################################
-# 2. Oratab parser
-###############################################################################
 class OratabParser:
-    LOCATIONS = ["/etc/oratab", "/var/opt/oracle/oratab", "/opt/oracle/oratab"]
+    """Parse the oratab file to get Oracle SIDs and HOMEs"""
 
-    def __init__(self, path: Optional[str] = None):
-        self.path = path or self._auto_locate()
-        if not self.path or not Path(self.path).exists():
-            raise FileNotFoundError("oratab not found – supply with --oratab")
+    def __init__(self, oratab_path=None):
+        """Initialize with path to oratab file"""
+        self.oratab_path = oratab_path or self._find_oratab()
 
-    def _auto_locate(self) -> Optional[str]:
-        for p in self.LOCATIONS:
-            if Path(p).exists():
-                return p
+    def _find_oratab(self):
+        """Find the oratab file in common locations"""
+        common_locations = [
+            '/etc/oratab',
+            '/var/opt/oracle/oratab',
+            '/opt/oracle/oratab'
+        ]
+
+        for location in common_locations:
+            if os.path.exists(location):
+                return location
+
         return None
 
-    def entries(self):
-        for line in Path(self.path).read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            sid, *rest = line.split(":")
-            if len(rest) < 1:
-                continue
-            home = rest[0]
-            if sid.startswith(("+", "*")):
-                continue
-            yield {"sid": sid, "oracle_home": home}
+    def get_database_entries(self):
+        """
+        Parse oratab file to get database entries
 
-###############################################################################
-# 3. OracleRunner (DB checks)
-###############################################################################
-class OracleRunner:
-    def __init__(self, home: str, sid: str, timeout: int, debug: bool = False):
-        self.home, self.sid, self.timeout, self.debug = home, sid, timeout, debug
-        if not Path(self.home).exists():
-            raise ValueError(f"ORACLE_HOME does not exist: {self.home}")
+        Returns:
+            list: List of dictionaries with 'sid' and 'oracle_home' keys
+        """
+        if not self.oratab_path or not os.path.exists(self.oratab_path):
+            print(f"Error: Could not find oratab file at {self.oratab_path}")
+            return []
 
-    # ----- helpers -------------------------------------------------------
-    def _env(self):
-        env = os.environ.copy()
-        env.update(
-            {
-                "ORACLE_HOME": self.home,
-                "ORACLE_SID": self.sid,
-                "PATH": f"{self.home}/bin:" + env.get("PATH", ""),
-                "LD_LIBRARY_PATH": f"{self.home}/lib:" + env.get("LD_LIBRARY_PATH", ""),
-            }
-        )
-        return env
+        entries = []
 
-    def _run(self, cmd: str):
-        if self.debug:
-            print("[DEBUG]", cmd)
         try:
-            proc = subprocess.run(
+            with open(self.oratab_path, 'r') as file:
+                for line in file:
+                    # Skip comments and empty lines
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+
+                    # Parse SID:ORACLE_HOME:startup_flag format
+                    parts = line.split(':')
+                    if len(parts) >= 2:
+                        sid = parts[0]
+                        oracle_home = parts[1]
+
+                        # Skip ASM, APX, and other special entries
+                        if sid.startswith('+') or sid.startswith('*'):
+                            continue
+
+                        entries.append({
+                            'sid': sid,
+                            'oracle_home': oracle_home
+                        })
+
+            return entries
+        except Exception as e:
+            print(f"Error reading oratab file: {e}")
+            return []
+
+
+class OracleRunner:
+    """Execute Oracle SQLPlus commands from Python"""
+
+    def __init__(self, oracle_home=None, oracle_sid=None, use_sysdba=True):
+        """Initialize with Oracle environment details"""
+        self.oracle_home = oracle_home or os.environ.get('ORACLE_HOME')
+        self.oracle_sid = oracle_sid or os.environ.get('ORACLE_SID')
+        self.use_sysdba = use_sysdba
+
+        # Validate Oracle environment
+        if not self.oracle_home:
+            raise ValueError("ORACLE_HOME not set. Either pass it to the constructor or set it in environment.")
+
+        if not self.oracle_sid:
+            raise ValueError("ORACLE_SID not set. Either pass it to the constructor or set it in environment.")
+
+    def execute_query(self, sql_query, formatting="default"):
+        """
+        Execute an Oracle SQL query via SQLPlus
+
+        Args:
+            sql_query (str): SQL query to execute
+            formatting (str): Output format ('default', 'csv', 'json')
+
+        Returns:
+            str: Query results as formatted text
+        """
+        # Create temporary SQL file
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.sql', delete=False) as sql_file:
+            sql_path = sql_file.name
+
+            # Prepare SQL formatting
+            if formatting == "csv":
+                sql_file.write("SET PAGESIZE 0\n")
+                sql_file.write("SET FEEDBACK OFF\n")
+                sql_file.write("SET HEADING ON\n")
+                sql_file.write("SET MARKUP CSV ON\n")
+            else:
+                sql_file.write("SET PAGESIZE 50000\n")
+                sql_file.write("SET LINESIZE 1000\n")
+                sql_file.write("SET FEEDBACK OFF\n")
+                sql_file.write("SET VERIFY OFF\n")
+                sql_file.write("SET HEADING ON\n")
+
+            # Add the main query
+            sql_file.write(f"{sql_query}\n")
+            sql_file.write("EXIT;\n")
+
+        try:
+            # Create environment with Oracle settings
+            env = os.environ.copy()
+            env["ORACLE_HOME"] = self.oracle_home
+            env["ORACLE_SID"] = self.oracle_sid
+            env["PATH"] = f"{self.oracle_home}/bin:{env.get('PATH', '')}"
+            env["LD_LIBRARY_PATH"] = f"{self.oracle_home}/lib:{env.get('LD_LIBRARY_PATH', '')}"
+
+            # Build the SQLPlus command correctly
+            if self.use_sysdba:
+                cmd = f"sqlplus -S '/ as sysdba' @{sql_path}"
+            else:
+                cmd = f"sqlplus -S '/' @{sql_path}"
+
+            # Execute SQLPlus with the SQL file
+            result = subprocess.run(
                 cmd,
                 shell=True,
-                text=True,
+                env=env,
                 capture_output=True,
-                timeout=self.timeout,
-                env=self._env(),
+                text=True
             )
-        except subprocess.TimeoutExpired:
-            raise TimeoutError(f"Timeout ({self.timeout}s) on {cmd}")
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or f"Command failed: {cmd}")
-        return proc.stdout.strip()
 
-    # ----- sqlplus wrapper ----------------------------------------------
-    def execute(self, sql: str, csv_fmt: bool = False) -> str:
-        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".sql") as tmp:
-            if csv_fmt:
-                tmp.write("SET PAGES 0 FEEDBACK OFF HEADING ON MARKUP CSV ON\n")
-            else:
-                tmp.write("SET PAGES 50000 LINES 1000 FEEDBACK OFF VERIFY OFF HEADING ON\n")
-            tmp.write(sql + "\nEXIT;\n")
-            script = tmp.name
-        try:
-            return self._run(f"sqlplus -S '/ as sysdba' @{script}")
+            output = result.stdout
+
+            # Print any error for debugging
+            if result.returncode != 0:
+                print(f"SQLPlus Error for {self.oracle_sid}: {result.stderr}")
+
+            # Convert to JSON if requested
+            if formatting == "json" and output.strip():
+                # Parse CSV output into JSON
+                csv_reader = csv.DictReader(output.strip().split('\n'))
+                json_data = [row for row in csv_reader]
+                return json.dumps(json_data, indent=2)
+
+            return output
+
         finally:
-            Path(script).unlink(missing_ok=True)
+            # Clean up temporary SQL file
+            if os.path.exists(sql_path):
+                os.unlink(sql_path)
 
-    def query_dict(self, sql: str):
-        out = self.execute(sql, csv_fmt=True)
-        return list(csv.DictReader(out.splitlines())) if out else []
+    def execute_query_as_dict(self, sql_query):
+        """
+        Execute a query and return results as a list of dictionaries
 
-    # ----- high-level DB info -------------------------------------------
-    def accessible(self) -> bool:
+        Args:
+            sql_query (str): SQL query to execute
+
+        Returns:
+            list: List of dictionaries representing rows
+        """
+        # First execute with CSV formatting
+        csv_result = self.execute_query(sql_query, formatting="csv")
+
+        if not csv_result.strip():
+            return []
+
+        # Parse CSV to get rows as dictionaries
+        lines = csv_result.strip().split('\n')
+        if len(lines) < 2:  # Just header or empty
+            return []
+
+        reader = csv.DictReader(lines)
+        return list(reader)
+
+    def execute_script(self, script_path):
+        """
+        Execute an Oracle SQL script via SQLPlus
+
+        Args:
+            script_path (str): Path to SQL script file
+
+        Returns:
+            str: Script execution results
+        """
+        if not os.path.exists(script_path):
+            raise FileNotFoundError(f"SQL script not found: {script_path}")
+
+        # Create environment with Oracle settings
+        env = os.environ.copy()
+        env["ORACLE_HOME"] = self.oracle_home
+        env["ORACLE_SID"] = self.oracle_sid
+        env["PATH"] = f"{self.oracle_home}/bin:{env.get('PATH', '')}"
+        env["LD_LIBRARY_PATH"] = f"{self.oracle_home}/lib:{env.get('LD_LIBRARY_PATH', '')}"
+
+        # Build the SQLPlus command correctly
+        if self.use_sysdba:
+            cmd = f"sqlplus -S '/ as sysdba' @{script_path}"
+        else:
+            cmd = f"sqlplus -S '/' @{script_path}"
+
+        # Execute SQLPlus with the script file
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            env=env,
+            capture_output=True,
+            text=True
+        )
+
+        # Print any error for debugging
+        if result.returncode != 0:
+            print(f"SQLPlus Error for {self.oracle_sid}: {result.stderr}")
+
+        return result.stdout
+
+    def is_database_accessible(self):
+        """
+        Verify if the database is accessible via SQLPlus
+
+        Returns:
+            bool: True if database is accessible, False otherwise
+        """
         try:
-            return "1" in self.execute("select 1 from dual")
-        except Exception:
+            query = "SELECT 1 FROM dual;"
+            result = self.execute_query(query)
+            return "1" in result
+        except Exception as e:
+            print(f"Error connecting to database {self.oracle_sid}: {e}")
             return False
 
-    def instance(self):
-        return (self.query_dict("select instance_name,status,database_status from v$instance") or [{}])[0]
+    def is_primary_or_standby(self):
+        """
+        Check if the database is primary or standby
 
-    def role(self):
-        return (self.query_dict("select database_role,open_mode from v$database") or [{}])[0]
+        Returns:
+            dict: Database role information
+        """
+        query = "SELECT database_role, open_mode FROM v$database;"
+        results = self.execute_query_as_dict(query)
 
-    def version(self):
-        return (self.query_dict("select banner from v$version where banner like 'Oracle%'") or [{}])[0]
+        if not results:
+            return {"error": "No results returned"}
 
-    def connections(self):
-        return (
-            self.query_dict("select count(*) active_connections from v$session where status='ACTIVE' and username is not null") or [{}]
-        )[0]
+        return results[0]
 
-    def tablespaces(self):
-        return self.query_dict(
-            """
-            with free as (
-              select tablespace_name, round(sum(bytes)/1048576,2) free_mb
-              from dba_free_space group by tablespace_name
-            ), size as (
-              select tablespace_name,
-                     round(sum(bytes)/1048576,2) size_mb,
-                     round(sum(greatest(bytes,maxbytes))/1048576,2) max_size_mb
-              from dba_data_files group by tablespace_name
-            )
-            select s.tablespace_name,
-                   size_mb,
-                   free_mb,
-                   max_size_mb,
-                   round((max_size_mb-free_mb)/max_size_mb*100,2) used_pct
-            from size s join free f on f.tablespace_name=s.tablespace_name
-            order by used_pct desc
-            """
-        )
+    def get_instance_status(self):
+        """
+        Get database instance status
 
-###############################################################################
-# 4. ListenerChecker
-###############################################################################
-class ListenerChecker:
-    def __init__(self, home: str, timeout: int, debug: bool = False):
-        self.home, self.timeout, self.debug = home, timeout, debug
+        Returns:
+            dict: Instance status information
+        """
+        query = "SELECT instance_name, status, database_status FROM v$instance;"
+        results = self.execute_query_as_dict(query)
 
-    def _env(self):
-        env = os.environ.copy()
-        env.update(
-            {
-                "ORACLE_HOME": self.home,
-                "PATH": f"{self.home}/bin:" + env.get("PATH", ""),
-                "LD_LIBRARY_PATH": f"{self.home}/lib:" + env.get("LD_LIBRARY_PATH", ""),
+        if not results:
+            return {"error": "No results returned"}
+
+        return results[0]
+
+    def get_standby_apply_lag(self):
+        """
+        Check the standby apply lag if the database is in standby mode
+
+        Returns:
+            dict: Apply lag information
+        """
+        # First check if MRP is running
+        mrp_query = """
+        SELECT process, status, sequence# as sequence_number, 
+               to_char(client_process) as client_process
+        FROM v$managed_standby 
+        WHERE process LIKE 'MRP%';
+        """
+        mrp_results = self.execute_query_as_dict(mrp_query)
+        mrp_status = {"running": False, "status": "NOT RUNNING"}
+
+        if mrp_results:
+            mrp_status = {
+                "running": True,
+                "status": mrp_results[0].get("STATUS", "UNKNOWN"),
+                "sequence": mrp_results[0].get("SEQUENCE_NUMBER", "UNKNOWN"),
+                "client_process": mrp_results[0].get("CLIENT_PROCESS", "UNKNOWN")
             }
+
+        # Get apply lag information
+        lag_query = """
+        SELECT ROUND((SYSDATE - SCN_TO_TIMESTAMP(CURRENT_SCN))*24*60,1) as lag_minutes
+        FROM V$DATABASE;
+        """
+        lag_results = self.execute_query_as_dict(lag_query)
+        lag_minutes = "UNKNOWN"
+
+        if lag_results:
+            try:
+                lag_minutes = lag_results[0].get("LAG_MINUTES", "UNKNOWN")
+            except:
+                lag_minutes = "ERROR CALCULATING"
+
+        # Get last applied archive log time
+        last_applied_query = """
+        SELECT to_char(MAX(COMPLETION_TIME), 'YYYY-MM-DD HH24:MI:SS') as last_applied_time
+        FROM V$ARCHIVED_LOG
+        WHERE APPLIED = 'YES';
+        """
+        last_applied_results = self.execute_query_as_dict(last_applied_query)
+        last_applied_time = "UNKNOWN"
+
+        if last_applied_results:
+            last_applied_time = last_applied_results[0].get("LAST_APPLIED_TIME", "UNKNOWN")
+
+        return {
+            "mrp": mrp_status,
+            "lag_minutes": lag_minutes,
+            "last_applied": last_applied_time
+        }
+
+    def get_database_connections(self):
+        """
+        Get current database connection count
+
+        Returns:
+            dict: Connection information
+        """
+        query = """
+        SELECT COUNT(*) as active_connections
+        FROM v$session
+        WHERE status = 'ACTIVE' AND username IS NOT NULL;
+        """
+        results = self.execute_query_as_dict(query)
+
+        if not results:
+            return {"active_connections": "UNKNOWN"}
+
+        return results[0]
+
+    def get_tablespaces_status(self):
+        """
+        Get tablespace usage information
+
+        Returns:
+            list: Tablespace usage information
+        """
+        query = """
+        SELECT
+            tablespace_name,
+            size_mb,
+            free_mb,
+            max_size_mb,
+            max_free_mb,
+            ROUND((max_size_mb - max_free_mb) / max_size_mb * 100, 2) AS used_pct
+        FROM (
+            SELECT
+                a.tablespace_name,
+                b.size_mb,
+                a.free_mb,
+                b.max_size_mb,
+                a.free_mb + (b.max_size_mb - b.size_mb) AS max_free_mb
+            FROM
+                (SELECT
+                    tablespace_name,
+                    ROUND(SUM(bytes) / 1048576, 2) AS free_mb
+                 FROM dba_free_space
+                 GROUP BY tablespace_name) a,
+                (SELECT
+                    tablespace_name,
+                    ROUND(SUM(bytes) / 1048576, 2) AS size_mb,
+                    ROUND(SUM(GREATEST(bytes, maxbytes)) / 1048576, 2) AS max_size_mb
+                 FROM dba_data_files
+                 GROUP BY tablespace_name) b
+            WHERE a.tablespace_name = b.tablespace_name
         )
-        return env
+        ORDER BY used_pct DESC;
+        """
+        return self.execute_query_as_dict(query)
 
-    def _run(self, cmd: str) -> str:
-        if self.debug:
-            print("[DEBUG]", cmd)
+    def get_db_version(self):
+        """Get Oracle database version"""
+        query = "SELECT * FROM v$version WHERE banner LIKE 'Oracle%';"
+        results = self.execute_query_as_dict(query)
+
+        if not results:
+            return {"version": "UNKNOWN"}
+
+        return {"version": results[0].get("BANNER", "UNKNOWN")}
+
+
+class ListenerChecker:
+    """Check Oracle Net Listener status and services"""
+
+    def __init__(self, oracle_home=None):
+        """Initialize with Oracle environment details"""
+        self.oracle_home = oracle_home or os.environ.get('ORACLE_HOME')
+
+        # Validate Oracle environment
+        if not self.oracle_home:
+            raise ValueError("ORACLE_HOME not set. Either pass it to the constructor or set it in environment.")
+
+    def _run_lsnrctl_command(self, listener_name, command):
+        """
+        Run lsnrctl command and capture output
+
+        Args:
+            listener_name (str): Name of the listener
+            command (str): lsnrctl command to run
+
+        Returns:
+            str: Command output
+        """
+        # Create environment with Oracle settings
+        env = os.environ.copy()
+        env["ORACLE_HOME"] = self.oracle_home
+        env["PATH"] = f"{self.oracle_home}/bin:{env.get('PATH', '')}"
+        env["LD_LIBRARY_PATH"] = f"{self.oracle_home}/lib:{env.get('LD_LIBRARY_PATH', '')}"
+
+        # Build the lsnrctl command
+        if listener_name:
+            cmd = f"lsnrctl {command} {listener_name}"
+        else:
+            cmd = f"lsnrctl {command}"
+
+        # Execute lsnrctl command
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            env=env,
+            capture_output=True,
+            text=True
+        )
+
+        return result.stdout
+
+    def get_listeners_from_file(self):
+        """
+        Parse listener.ora to extract listener names
+
+        Returns:
+            list: List of listener names
+        """
+        listeners = []
+        listener_ora_path = f"{self.oracle_home}/network/admin/listener.ora"
+
+        if not os.path.exists(listener_ora_path):
+            print(f"Warning: listener.ora not found at {listener_ora_path}")
+            return ["LISTENER"]  # Default listener name
+
         try:
-            proc = subprocess.run(cmd, shell=True, text=True, capture_output=True, timeout=self.timeout, env=self._env())
-        except subprocess.TimeoutExpired:
-            return "TIMEOUT"
-        return proc.stdout
+            with open(listener_ora_path, 'r') as file:
+                content = file.read()
 
-    # ----- discover listener names --------------------------------------
-    def listener_names(self) -> List[str]:
-        lsnr_ora = Path(self.home) / "network/admin/listener.ora"
-        if not lsnr_ora.exists():
-            return ["LISTENER"]
-        names = set()
-        for m in re.finditer(r"(\w+)_?LISTENER\s*=", lsnr_ora.read_text()):
-            n = m.group(1)
-            if n.upper() != "SID_LIST":
-                names.add(n)
-        return list(names) or ["LISTENER"]
+                # Use regex to find listener names
+                # Pattern matches anything before _LISTENER= or just LISTENER=
+                listener_patterns = [
+                    r'(\w+)_LISTENER\s*=',  # Custom named listeners
+                    r'(LISTENER)\s*='  # Default listener
+                ]
 
-    # ----- status --------------------------------------------------------
-    def status(self, name: str) -> Dict:
-        out = self._run(f"lsnrctl status {name}")
-        if out == "TIMEOUT":
-            return {"name": name, "status": "TIMEOUT", "services": []}
-        status = "UP" if "The command completed successfully" in out else "DOWN"
-        services = re.findall(r'Service\s+"([^"]+)"', out)
-        return {"name": name, "status": status, "services": [{"name": s} for s in services]}
+                for pattern in listener_patterns:
+                    matches = re.findall(pattern, content)
+                    for m in matches:
+                        if m.upper() != "SID_LIST":  # Filter out invalid
+                            listeners.append(m)
 
-    # convenience
-    def all_statuses(self):
-        return [self.status(n) for n in self.listener_names()]
+                # Remove duplicates
+                listeners = list(set(listeners))
 
-###############################################################################
-# 5. HTML report builder
-###############################################################################
-class Report:
+                if not listeners:
+                    listeners = ["LISTENER"]  # Default if none found
+
+            return listeners
+        except Exception as e:
+            print(f"Error reading listener.ora: {e}")
+            return ["LISTENER"]  # Default listener name
+
+    def check_listener_status(self, listener_name):
+        """
+        Check status of an Oracle listener
+
+        Args:
+            listener_name (str): Name of the listener
+
+        Returns:
+            dict: Listener status information
+        """
+        status_output = self._run_lsnrctl_command(listener_name, "status")
+
+        # Parse status output
+        listener_info = {
+            "name": listener_name,
+            "status": "DOWN",
+            "version": "Unknown",
+            "start_date": "Unknown",
+            "uptime": "Unknown",
+            "services": [],
+            "endpoints": []
+        }
+
+        if not status_output or "TNS-12541" in status_output:
+            return listener_info
+
+        # Parse version
+        version_match = re.search(r'Version\s+([\d\.]+)', status_output)
+        if version_match:
+            listener_info["version"] = version_match.group(1)
+
+        # Parse start date & uptime
+        start_date_match = re.search(r'Start Date\s+(.+)', status_output)
+        if start_date_match:
+            listener_info["start_date"] = start_date_match.group(1).strip()
+
+            # Calculate uptime if possible
+            try:
+                start_datetime = datetime.datetime.strptime(
+                    listener_info["start_date"],
+                    "%d-%b-%Y %H:%M:%S"
+                )
+                uptime = datetime.datetime.now() - start_datetime
+                days = uptime.days
+                hours, remainder = divmod(uptime.seconds, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                listener_info["uptime"] = f"{days}d {hours}h {minutes}m {seconds}s"
+            except:
+                pass
+
+        # Check if listener is running
+        if "The command completed successfully" in status_output and "STATUS" in status_output.upper():
+            listener_info["status"] = "UP"
+
+        # Extract registered services
+        services_section = re.search(r'Services Summary\.\.\.(.+?)The command completed successfully',
+                                     status_output, re.DOTALL)
+
+        if services_section:
+            services_text = services_section.group(1)
+            service_lines = services_text.strip().split('\n')
+
+            for line in service_lines:
+                line = line.strip()
+                if "Service" in line and "has" in line:
+                    parts = line.split('"')
+                    if len(parts) >= 3:
+                        service_name = parts[1]
+                        instance_info = line.split("has")[1].strip()
+                        listener_info["services"].append({
+                            "name": service_name,
+                            "instances": instance_info
+                        })
+
+        # Extract endpoints
+        endpoints_section = re.search(r'Listening Endpoints Summary\.\.\.(.+?)Services Summary',
+                                      status_output, re.DOTALL)
+
+        if endpoints_section:
+            endpoints_text = endpoints_section.group(1)
+            endpoint_lines = endpoints_text.strip().split('\n')
+
+            for line in endpoint_lines:
+                line = line.strip()
+                if line and "UNKNOWN" not in line:
+                    listener_info["endpoints"].append(line)
+
+        return listener_info
+
+    def check_all_listeners(self):
+        """
+        Check status of all listeners defined in listener.ora
+
+        Returns:
+            list: List of listener status dictionaries
+        """
+        listeners = self.get_listeners_from_file()
+        return [self.check_listener_status(listener) for listener in listeners]
+
+
+class ConsolidatedHTMLReportGenerator:
+    """Generate consolidated HTML reports for multiple Oracle databases"""
+
     @staticmethod
-    def _cls(val: str, good: float, warn: float):
-        try:
-            v = float(val)
-            if v <= good:
+    def _get_open_mode_class(open_mode, is_primary):
+        """Determine CSS class for open mode based on database role"""
+        if is_primary:
+            if open_mode in ["READ WRITE", "READ WRITE OPEN"]:
                 return "status-good"
-            if v <= warn:
+            else:
+                return "status-error"
+        else:
+            if open_mode in ["READ ONLY", "READ ONLY WITH APPLY"]:
+                return "status-good"
+            else:
+                return "status-error"
+
+    @staticmethod
+    def _get_lag_class(lag_minutes):
+        """Determine CSS class for standby lag"""
+        try:
+            lag = float(lag_minutes)
+            if lag <= 5:
+                return "status-good"
+            elif lag <= 30:
                 return "status-warning"
-        except Exception:
-            pass
-        return "status-error"
+            else:
+                return "status-error"
+        except (ValueError, TypeError):
+            return "status-error"
 
-    @classmethod
-    def build(cls, dbs: List[Dict], listeners: List[Dict]) -> str:
-        ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        host = os.uname().nodename
+    @staticmethod
+    def _get_usage_class(used_pct):
+        """Determine CSS class for tablespace usage percentage"""
+        try:
+            usage = float(used_pct)
+            if usage < 75:
+                return "status-good"
+            elif usage < 90:
+                return "status-warning"
+            else:
+                return "status-error"
+        except (ValueError, TypeError):
+            return "status-error"
 
-        # ---- DB summary ----
-        db_rows = ""
-        db_details = ""
-        for d in dbs:
-            sid = d["sid"]
-            if not d.get("accessible"):
-                db_rows += f"<tr><td>{sid}</td><td colspan=4 class='status-error'>NOT ACCESSIBLE</td></tr>"
+    @staticmethod
+    def generate_consolidated_report(all_db_info, all_listener_info=None):
+        """
+        Generate a consolidated HTML report for multiple databases
+
+        Args:
+            all_db_info (list): List of database information dictionaries
+            all_listener_info (list): Optional list of listener information dictionaries
+
+        Returns:
+            str: HTML report content
+        """
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        hostname = os.uname().nodename
+
+        # Generate database summary section
+        db_summary_rows = ""
+        for db in all_db_info:
+            if db.get("accessible") is False:
+                db_summary_rows += f"""
+                <tr>
+                    <td>{db.get("sid")}</td>
+                    <td class="status-error">NOT ACCESSIBLE</td>
+                    <td>N/A</td>
+                    <td>N/A</td>
+                    <td>N/A</td>
+                    <td>N/A</td>
+                </tr>
+                """
                 continue
 
-            inst, role = d["instance"], d["role"]
-            status = inst.get("STATUS", "UNKNOWN")
-            open_mode = role.get("OPEN_MODE", "UNKNOWN")
-            db_role = role.get("DATABASE_ROLE", "UNKNOWN")
-            version = d["version"].get("banner", "UNKNOWN")
+            instance_name = db.get("instance", {}).get("INSTANCE_NAME", "UNKNOWN")
+            db_role = db.get("role", {}).get("DATABASE_ROLE", "UNKNOWN")
+            db_open_mode = db.get("role", {}).get("OPEN_MODE", "UNKNOWN")
+            instance_status = db.get("instance", {}).get("STATUS", "UNKNOWN")
+            db_version = db.get("version", {}).get("version", "UNKNOWN")
 
-            status_cls = "status-good" if status == "OPEN" else "status-error"
-            if db_role == "PRIMARY":
-                open_cls = "status-good" if open_mode == "READ WRITE" else "status-error"
-            else:
-                open_cls = "status-good" if open_mode.startswith("READ ONLY") else "status-error"
+            is_primary = db_role == "PRIMARY"
+            status_class = "status-good" if instance_status == "OPEN" else "status-error"
+            open_mode_class = ConsolidatedHTMLReportGenerator._get_open_mode_class(db_open_mode, is_primary)
 
-            db_rows += (
-                f"<tr><td><a href='#db-{sid}'>{sid}</a></td>"
-                f"<td>{db_role}</td>"
-                f"<td class='{open_cls}'>{open_mode}</td>"
-                f"<td class='{status_cls}'>{status}</td>"
-                f"<td>{version}</td></tr>"
-            )
+            lag_display = "N/A"
+            if not is_primary:
+                lag_minutes = db.get("standby_info", {}).get("lag_minutes", "UNKNOWN")
+                lag_class = ConsolidatedHTMLReportGenerator._get_lag_class(lag_minutes)
+                lag_display = f'<span class="{lag_class}">{lag_minutes} min</span>'
 
-            # --- details block ---
-            conn = d["connections"].get("active_connections", "UNKNOWN")
-            db_details += f"<h2 id='db-{sid}'>{sid}</h2>"
-            db_details += (
-                f"<p><b>Status:</b> <span class='{status_cls}'>{status}</span><br>"
-                f"<b>Role:</b> {db_role}<br>"
-                f"<b>Open Mode:</b> {open_mode}<br>"
-                f"<b>Version:</b> {version}<br>"
-                f"<b>Active Connections:</b> {conn}</p>"
-            )
+            db_summary_rows += f"""
+            <tr>
+                <td><a href="#db-{db.get('sid')}">{instance_name}</a></td>
+                <td>{db_role}</td>
+                <td class="{open_mode_class}">{db_open_mode}</td>
+                <td class="{status_class}">{instance_status}</td>
+                <td>{lag_display}</td>
+                <td>{db_version}</td>
+            </tr>
+            """
 
-            if d["tablespaces"]:
-                db_details += "<table><tr><th>Tablespace</th><th>Size MB</th><th>Free MB</th><th>% Used</th></tr>"
-                for t in d["tablespaces"]:
-                    used_cls = cls._cls(t["used_pct"], 75, 90)
-                    db_details += (
-                        f"<tr><td>{t['tablespace_name']}</td>"
-                        f"<td>{t['size_mb']}</td><td>{t['free_mb']}</td>"
-                        f"<td class='{used_cls}'>{t['used_pct']}</td></tr>"
-                    )
-                db_details += "</table><br>"
-            db_details += "<hr>"
+        # Generate listener summary section
+        listener_summary_rows = ""
+        if all_listener_info:
+            for listener_group in all_listener_info:
+                oracle_home = listener_group.get("oracle_home", "UNKNOWN")
+                for listener in listener_group.get("listeners", []):
+                    listener_name = listener.get("name", "UNKNOWN")
+                    listener_status = listener.get("status", "DOWN")
+                    status_class = "status-good" if listener_status == "UP" else "status-error"
+                    service_count = len(listener.get("services", []))
 
-        # ---- Listener summary ----
-        l_rows = ""
-        for g in listeners:
-            for l in g["listeners"]:
-                stat_cls = "status-good" if l["status"] == "UP" else "status-error"
-                services = ", ".join(s["name"] for s in l["services"]) or "—"
-                l_rows += (
-                    f"<tr><td>{l['name']}</td>"
-                    f"<td class='{stat_cls}'>{l['status']}</td>"
-                    f"<td>{services}</td>"
-                    f"<td>{g['oracle_home']}</td></tr>"
-                )
+                    listener_summary_rows += f"""
+                    <tr>
+                        <td><a href="#listener-{listener_name}-{oracle_home.replace('/', '_')}">{listener_name}</a></td>
+                        <td class="{status_class}">{listener_status}</td>
+                        <td>{service_count}</td>
+                        <td>{oracle_home}</td>
+                    </tr>
+                    """
 
-        # ---- HTML ----
-        return f"""
+        # Generate database detail sections
+        db_detail_sections = ""
+        for db in all_db_info:
+            sid = db.get("sid")
+
+            if db.get("accessible") is False:
+                db_detail_sections += f"""
+                <div id="db-{sid}" class="section">
+                    <h2>Database: {sid}</h2>
+                    <div class="card">
+                        <h3>Status</h3>
+                        <p class="status-error">Database is not accessible or not running</p>
+                    </div>
+                </div>
+                <hr>
+                """
+                continue
+
+            instance_name = db.get("instance", {}).get("INSTANCE_NAME", "UNKNOWN")
+            db_role = db.get("role", {}).get("DATABASE_ROLE", "UNKNOWN")
+            db_open_mode = db.get("role", {}).get("OPEN_MODE", "UNKNOWN")
+            instance_status = db.get("instance", {}).get("STATUS", "UNKNOWN")
+            db_status = db.get("instance", {}).get("DATABASE_STATUS", "UNKNOWN")
+            active_connections = db.get("connections", {}).get("ACTIVE_CONNECTIONS", "UNKNOWN")
+            db_version = db.get("version", {}).get("version", "UNKNOWN")
+            oracle_home = db.get("oracle_home", "UNKNOWN")
+
+            is_primary = db_role == "PRIMARY"
+            status_class = "status-good" if instance_status == "OPEN" else "status-error"
+            open_mode_class = ConsolidatedHTMLReportGenerator._get_open_mode_class(db_open_mode, is_primary)
+            db_status_class = "status-good" if db_status == "ACTIVE" else "status-error"
+
+            standby_card = ""
+            if not is_primary:
+                mrp_status = db.get("standby_info", {}).get("mrp", {}).get("status", "UNKNOWN")
+                mrp_running = db.get("standby_info", {}).get("mrp", {}).get("running", False)
+                lag_minutes = db.get("standby_info", {}).get("lag_minutes", "UNKNOWN")
+                last_applied = db.get("standby_info", {}).get("last_applied", "UNKNOWN")
+
+                mrp_class = "status-good" if mrp_running else "status-error"
+                lag_class = ConsolidatedHTMLReportGenerator._get_lag_class(lag_minutes)
+
+                standby_card = f"""
+                <div class="card">
+                    <h3>Standby Status</h3>
+                    <table>
+                        <tr><th>MRP Status</th><td class="{mrp_class}">{mrp_status}</td></tr>
+                        <tr><th>Apply Lag (minutes)</th><td class="{lag_class}">{lag_minutes}</td></tr>
+                        <tr><th>Last Applied Time</th><td>{last_applied}</td></tr>
+                    </table>
+                </div>
+                """
+
+            tablespaces = db.get("tablespaces", [])
+            tablespace_table = ""
+            if tablespaces:
+                tablespace_rows = ""
+                for ts in tablespaces:
+                    name = ts.get("TABLESPACE_NAME", "UNKNOWN")
+                    size_mb = ts.get("SIZE_MB", "0")
+                    free_mb = ts.get("FREE_MB", "0")
+                    used_pct = ts.get("USED_PCT", "0")
+                    usage_class = ConsolidatedHTMLReportGenerator._get_usage_class(used_pct)
+                    tablespace_rows += f"""
+                    <tr>
+                        <td>{name}</td>
+                        <td>{size_mb} MB</td>
+                        <td>{free_mb} MB</td>
+                        <td class="{usage_class}">{used_pct}%</td>
+                    </tr>
+                    """
+                tablespace_table = f"""
+                <div class="card full-width">
+                    <h3>Tablespace Status</h3>
+                    <table>
+                        <tr><th>Tablespace Name</th><th>Size (MB)</th><th>Free (MB)</th><th>Used (%)</th></tr>
+                        {tablespace_rows}
+                    </table>
+                </div>
+                """
+
+            db_detail_sections += f"""
+            <div id="db-{sid}" class="section">
+                <h2>Database: {sid}</h2>
+                <div class="card">
+                    <h3>General Info</h3>
+                    <table>
+                        <tr><th>Instance Name</th><td>{instance_name}</td></tr>
+                        <tr><th>Oracle Home</th><td>{oracle_home}</td></tr>
+                        <tr><th>Status</th><td class="{status_class}">{instance_status}</td></tr>
+                        <tr><th>Database Status</th><td class="{db_status_class}">{db_status}</td></tr>
+                        <tr><th>Role</th><td>{db_role}</td></tr>
+                        <tr><th>Open Mode</th><td class="{open_mode_class}">{db_open_mode}</td></tr>
+                        <tr><th>Version</th><td>{db_version}</td></tr>
+                        <tr><th>Active Connections</th><td>{active_connections}</td></tr>
+                    </table>
+                </div>
+                {standby_card}
+                {tablespace_table}
+            </div>
+            <hr>
+            """
+
+        # Now assemble the full HTML
+        html_output = f"""
         <html>
         <head>
-            <title>Oracle Status Report</title>
+            <title>Oracle Database Status Report</title>
             <style>
-                body{{font-family:Arial,sans-serif;margin:20px}}
-                table{{border-collapse:collapse;width:100%}}
-                th,td{{border:1px solid #ccc;padding:6px;text-align:left}}
-                th{{background:#f0f0f0}}
-                .status-good{{background:#c8e6c9}}
-                .status-warning{{background:#fff9c4}}
-                .status-error{{background:#ffcdd2}}
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                table {{ border-collapse: collapse; width: 100%; }}
+                th, td {{ border: 1px solid #ccc; padding: 8px; text-align: left; }}
+                th {{ background-color: #f2f2f2; }}
+                .status-good {{ background-color: #c8e6c9; }}
+                .status-warning {{ background-color: #fff9c4; }}
+                .status-error {{ background-color: #ffcdd2; }}
+                .card {{ border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; border-radius: 5px; }}
+                .full-width {{ width: 100%; }}
             </style>
         </head>
         <body>
-            <h1>Oracle Database & Listener Report</h1>
-            <p><b>Host:</b> {host} &nbsp;&nbsp; <b>Generated:</b> {ts}</p>
+            <h1>Oracle Database Status Report</h1>
+            <p><strong>Host:</strong> {hostname}</p>
+            <p><strong>Generated At:</strong> {timestamp}</p>
 
             <h2>Database Summary</h2>
             <table>
-                <tr><th>SID</th><th>Role</th><th>Open Mode</th><th>Status</th><th>Version</th></tr>
-                {db_rows}
+                <tr>
+                    <th>SID</th>
+                    <th>Role</th>
+                    <th>Open Mode</th>
+                    <th>Status</th>
+                    <th>Lag</th>
+                    <th>Version</th>
+                </tr>
+                {db_summary_rows}
             </table>
 
             <h2>Listener Summary</h2>
             <table>
-                <tr><th>Name</th><th>Status</th><th>Services</th><th>ORACLE_HOME</th></tr>
-                {l_rows}
+                <tr>
+                    <th>Listener</th>
+                    <th>Status</th>
+                    <th>Services</th>
+                    <th>ORACLE_HOME</th>
+                </tr>
+                {listener_summary_rows}
             </table>
 
             <hr>
-            {db_details}
+            <h2>Database Details</h2>
+            {db_detail_sections}
         </body>
         </html>
         """
+        return html_output
 
-###############################################################################
-# 6. Main
-###############################################################################
+
 def main():
-    args = parse_args()
-    parser = OratabParser(args.oratab)
+    parser = OratabParser()
+    db_entries = parser.get_database_entries()
 
-    dbs: List[Dict] = []
-    listeners_by_home: Dict[str, Dict] = {}
+    all_db_info = []
+    listener_info_by_home = {}
 
-    for e in parser.entries():
-        sid, home = e["sid"], e["oracle_home"]
-        orc = OracleRunner(home, sid, args.timeout, args.debug)
-        info = {"sid": sid, "oracle_home": home}
+    for entry in db_entries:
+        sid = entry["sid"]
+        oracle_home = entry["oracle_home"]
+        db_info = {
+            "sid": sid,
+            "oracle_home": oracle_home
+        }
 
-        if not orc.accessible():
-            info["accessible"] = False
-            dbs.append(info)
-            continue
+        try:
+            oracle = OracleRunner(oracle_home=oracle_home, oracle_sid=sid)
+            if not oracle.is_database_accessible():
+                db_info["accessible"] = False
+                all_db_info.append(db_info)
+                continue
 
-        info["accessible"] = True
-        info["instance"] = orc.instance()
-        info["role"] = orc.role()
-        info["version"] = orc.version()
-        info["connections"] = orc.connections()
-        info["tablespaces"] = orc.tablespaces()
-        dbs.append(info)
+            db_info["accessible"] = True
+            db_info["instance"] = oracle.get_instance_status()
+            db_info["role"] = oracle.is_primary_or_standby()
+            db_info["version"] = oracle.get_db_version()
+            db_info["connections"] = oracle.get_database_connections()
+            db_info["tablespaces"] = oracle.get_tablespaces_status()
 
-        if home not in listeners_by_home:
-            lchk = ListenerChecker(home, args.timeout, args.debug)
-            listeners_by_home[home] = {
-                "oracle_home": home,
-                "listeners": lchk.all_statuses(),
+            if db_info["role"].get("DATABASE_ROLE") != "PRIMARY":
+                db_info["standby_info"] = oracle.get_standby_apply_lag()
+
+        except Exception as e:
+            db_info["accessible"] = False
+            db_info["error"] = str(e)
+
+        all_db_info.append(db_info)
+
+        # Listener checking (once per ORACLE_HOME)
+        if oracle_home not in listener_info_by_home:
+            listener_checker = ListenerChecker(oracle_home=oracle_home)
+            listeners = listener_checker.check_all_listeners()
+            print(f"[DEBUG] Listeners found for {oracle_home}: {[l['name'] for l in listeners]}")
+            listener_info_by_home[oracle_home] = {
+                "oracle_home": oracle_home,
+                "listeners": listeners
             }
 
-    html = Report.build(dbs, list(listeners_by_home.values()))
-    out = f"/tmp/oracle_status_report_{_dt.datetime.now():%Y%m%d_%H%M%S}.html"
-    Path(out).write_text(html)
-    print(f"Report written → {out}")
+    # Generate HTML report
+    report = ConsolidatedHTMLReportGenerator.generate_consolidated_report(
+        all_db_info,
+        list(listener_info_by_home.values())
+    )
+
+    # Write to output file
+    output_path = f"/tmp/oracle_status_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    with open(output_path, "w") as f:
+        f.write(report)
+
+    print(f"Report written to: {output_path}")
 
 if __name__ == "__main__":
     main()
-
