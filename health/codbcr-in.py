@@ -857,27 +857,27 @@ class ConsolidatedHTMLReportGenerator:
         <head>
             <title>Oracle Database Status Report</title>
             <style>
-                body { font-family: Arial, sans-serif; margin: 20px; }
-                table { border-collapse: collapse; width: 100%; }
-                th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
-                th { background-color: #f2f2f2; }
-                .status-good {
-                    background-color: #e8f5e9;  /* Light green */
-                    color: #2e7d32;             /* Dark green text */
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                table {{ border-collapse: collapse; width: 100%; }}
+                th, td {{ border: 1px solid #ccc; padding: 8px; text-align: left; }}
+                th {{ background-color: #f2f2f2; }}
+                .status-good {{
+                    background-color: #e8f5e9;
+                    color: #2e7d32;
                     font-weight: bold;
-                }
-                .status-warning {
-                    background-color: #fff9c4;  /* Light yellow */
-                    color: #f9a825;             /* Amber text */
+                }}
+                .status-warning {{
+                    background-color: #fff9c4;
+                    color: #f9a825;
                     font-weight: bold;
-                }
-                .status-error {
-                    background-color: #ffcdd2;  /* Light red */
-                    color: #c62828;             /* Dark red text */
+                }}
+                .status-error {{
+                    background-color: #ffcdd2;
+                    color: #c62828;
                     font-weight: bold;
-                }
-                .card { border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; border-radius: 5px; }
-                .full-width { width: 100%; }
+                }}
+                .card {{ border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; border-radius: 5px; }}
+                .full-width {{ width: 100%; }}
             </style>
         </head>
         <body>
