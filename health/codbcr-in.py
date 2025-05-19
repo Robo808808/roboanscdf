@@ -640,20 +640,9 @@ class ConsolidatedHTMLReportGenerator:
 
     @staticmethod
     def generate_consolidated_report(all_db_info, all_listener_info=None):
-        """
-        Generate a consolidated HTML report for multiple databases
-
-        Args:
-            all_db_info (list): List of database information dictionaries
-            all_listener_info (list): Optional list of listener information dictionaries
-
-        Returns:
-            str: HTML report content
-        """
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         hostname = os.uname().nodename
 
-        # Generate database summary section
         db_summary_rows = ""
         for db in all_db_info:
             if db.get("accessible") is False:
@@ -696,8 +685,8 @@ class ConsolidatedHTMLReportGenerator:
             </tr>
             """
 
-        # Generate listener summary section
         listener_summary_rows = ""
+        listener_detail_sections = ""
         if all_listener_info:
             for listener_group in all_listener_info:
                 oracle_home = listener_group.get("oracle_home", "UNKNOWN")
@@ -707,6 +696,7 @@ class ConsolidatedHTMLReportGenerator:
                     status_class = "status-good" if listener_status == "UP" else "status-error"
                     service_count = len(listener.get("services", []))
 
+                    # Summary row
                     listener_summary_rows += f"""
                     <tr>
                         <td><a href="#listener-{listener_name}-{oracle_home.replace('/', '_')}">{listener_name}</a></td>
@@ -716,7 +706,41 @@ class ConsolidatedHTMLReportGenerator:
                     </tr>
                     """
 
-        # Generate database detail sections
+                    # Detailed section
+                    version = listener.get("version", "UNKNOWN")
+                    uptime = listener.get("uptime", "UNKNOWN")
+                    start_date = listener.get("start_date", "UNKNOWN")
+                    endpoints = listener.get("endpoints", [])
+                    services = listener.get("services", [])
+
+                    endpoint_rows = "".join(f"<li>{ep}</li>" for ep in endpoints) or "<li>N/A</li>"
+                    service_rows = "".join(
+                        f"<li>{svc['name']} - {svc['instances']}</li>" for svc in services) or "<li>N/A</li>"
+
+                    listener_detail_sections += f"""
+                    <div id="listener-{listener_name}-{oracle_home.replace('/', '_')}" class="section">
+                        <h3>Listener: {listener_name}</h3>
+                        <div class="card">
+                            <table>
+                                <tr><th>Status</th><td class="{status_class}">{listener_status}</td></tr>
+                                <tr><th>Version</th><td>{version}</td></tr>
+                                <tr><th>Start Date</th><td>{start_date}</td></tr>
+                                <tr><th>Uptime</th><td>{uptime}</td></tr>
+                                <tr><th>ORACLE_HOME</th><td>{oracle_home}</td></tr>
+                            </table>
+                        </div>
+                        <div class="card">
+                            <h4>Listening Endpoints</h4>
+                            <ul>{endpoint_rows}</ul>
+                        </div>
+                        <div class="card">
+                            <h4>Registered Services</h4>
+                            <ul>{service_rows}</ul>
+                        </div>
+                    </div>
+                    <hr>
+                    """
+
         db_detail_sections = ""
         for db in all_db_info:
             sid = db.get("sid")
@@ -770,32 +794,31 @@ class ConsolidatedHTMLReportGenerator:
                 """
 
             tablespaces = db.get("tablespaces", [])
-            tablespace_table = ""
-            if tablespaces:
-                tablespace_rows = ""
-                for ts in tablespaces:
-                    name = ts.get("TABLESPACE_NAME", "UNKNOWN")
-                    size_mb = ts.get("SIZE_MB", "0")
-                    free_mb = ts.get("FREE_MB", "0")
-                    used_pct = ts.get("USED_PCT", "0")
-                    usage_class = ConsolidatedHTMLReportGenerator._get_usage_class(used_pct)
-                    tablespace_rows += f"""
-                    <tr>
-                        <td>{name}</td>
-                        <td>{size_mb} MB</td>
-                        <td>{free_mb} MB</td>
-                        <td class="{usage_class}">{used_pct}%</td>
-                    </tr>
-                    """
-                tablespace_table = f"""
-                <div class="card full-width">
-                    <h3>Tablespace Status</h3>
-                    <table>
-                        <tr><th>Tablespace Name</th><th>Size (MB)</th><th>Free (MB)</th><th>Used (%)</th></tr>
-                        {tablespace_rows}
-                    </table>
-                </div>
+            tablespace_rows = ""
+            for ts in tablespaces:
+                name = ts.get("TABLESPACE_NAME", "UNKNOWN")
+                size_mb = ts.get("SIZE_MB", "0")
+                free_mb = ts.get("FREE_MB", "0")
+                used_pct = ts.get("USED_PCT", "0")
+                usage_class = ConsolidatedHTMLReportGenerator._get_usage_class(used_pct)
+                tablespace_rows += f"""
+                <tr>
+                    <td>{name}</td>
+                    <td>{size_mb} MB</td>
+                    <td>{free_mb} MB</td>
+                    <td class="{usage_class}">{used_pct}%</td>
+                </tr>
                 """
+
+            tablespace_table = f"""
+            <div class="card full-width">
+                <h3>Tablespace Status</h3>
+                <table>
+                    <tr><th>Tablespace Name</th><th>Size (MB)</th><th>Free (MB)</th><th>Used (%)</th></tr>
+                    {tablespace_rows}
+                </table>
+            </div>
+            """
 
             db_detail_sections += f"""
             <div id="db-{sid}" class="section">
@@ -819,8 +842,7 @@ class ConsolidatedHTMLReportGenerator:
             <hr>
             """
 
-        # Now assemble the full HTML
-        html_output = f"""
+        return f"""
         <html>
         <head>
             <title>Oracle Database Status Report</title>
@@ -868,10 +890,13 @@ class ConsolidatedHTMLReportGenerator:
             <hr>
             <h2>Database Details</h2>
             {db_detail_sections}
+
+            <h2>Listener Details</h2>
+            {listener_detail_sections}
+
         </body>
         </html>
         """
-        return html_output
 
 
 def main():
