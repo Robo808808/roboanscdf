@@ -478,7 +478,9 @@ class ListenerChecker:
 
                 for pattern in listener_patterns:
                     matches = re.findall(pattern, content)
-                    listeners.extend(matches)
+                    for m in matches:
+                        if m.upper() != "SID_LIST":  # Filter out invalid
+                            listeners.append(m)
 
                 # Remove duplicates
                 listeners = list(set(listeners))
@@ -542,7 +544,7 @@ class ListenerChecker:
                 pass
 
         # Check if listener is running
-        if "Status of the LISTENER" in status_output and "TNS-12541" not in status_output:
+        if "The command completed successfully" in status_output and "STATUS" in status_output.upper():
             listener_info["status"] = "UP"
 
         # Extract registered services
@@ -877,6 +879,60 @@ class ConsolidatedHTMLReportGenerator:
             </html>
             """
 
+        return f"""
+        <html>
+        <head>
+            <title>Oracle Database Status Report</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                table {{ border-collapse: collapse; width: 100%; }}
+                th, td {{ border: 1px solid #ccc; padding: 8px; text-align: left; }}
+                th {{ background-color: #f2f2f2; }}
+                .status-good {{ background-color: #c8e6c9; }}
+                .status-warning {{ background-color: #fff9c4; }}
+                .status-error {{ background-color: #ffcdd2; }}
+                .card {{ border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; border-radius: 5px; }}
+                .full-width {{ width: 100%; }}
+            </style>
+        </head>
+        <body>
+            <h1>Oracle Database Status Report</h1>
+            <p><strong>Host:</strong> {hostname}</p>
+            <p><strong>Generated At:</strong> {timestamp}</p>
+
+            <h2>Database Summary</h2>
+            <table>
+                <tr>
+                    <th>SID</th>
+                    <th>Role</th>
+                    <th>Open Mode</th>
+                    <th>Status</th>
+                    <th>Lag</th>
+                    <th>Version</th>
+                </tr>
+                {db_summary_rows}
+            </table>
+
+            <h2>Listener Summary</h2>
+            <table>
+                <tr>
+                    <th>Listener</th>
+                    <th>Status</th>
+                    <th>Services</th>
+                    <th>ORACLE_HOME</th>
+                </tr>
+                {listener_summary_rows}
+            </table>
+
+            <hr>
+            <h2>Database Details</h2>
+            {db_detail_sections}
+
+        </body>
+        </html>
+        """
+
+
 
 def main():
     parser = OratabParser()
@@ -920,6 +976,7 @@ def main():
         if oracle_home not in listener_info_by_home:
             listener_checker = ListenerChecker(oracle_home=oracle_home)
             listeners = listener_checker.check_all_listeners()
+            print(f"[DEBUG] Listeners found for {oracle_home}: {[l['name'] for l in listeners]}")
             listener_info_by_home[oracle_home] = {
                 "oracle_home": oracle_home,
                 "listeners": listeners
