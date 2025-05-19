@@ -315,17 +315,14 @@ class OracleRunner:
 
         if lag_results:
             try:
-                val = lag_results[0].get("LAG_VALUE", "").lower()
-                if "minute" in val:
-                    lag_minutes = re.findall(r'\d+', val)[0]
-                elif "second" in val:
-                    seconds = int(re.findall(r'\d+', val)[0])
-                    lag_minutes = round(seconds / 60, 1)
-                elif "hour" in val:
-                    hours = int(re.findall(r'\d+', val)[0])
-                    lag_minutes = hours * 60
-                else:
-                    lag_minutes = val
+                val = lag_results[0].get("LAG_VALUE", "").strip()
+                match = re.match(r'^\+?(\d+)\s+(\d+):(\d+):(\d+)$', val)
+                if match:
+                    days = int(match.group(1))
+                    hours = int(match.group(2))
+                    minutes = int(match.group(3))
+                    # Total lag in minutes
+                    lag_minutes = days * 24 * 60 + hours * 60 + minutes
             except Exception as e:
                 lag_minutes = "PARSE_ERROR"
 
