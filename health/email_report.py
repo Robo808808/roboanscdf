@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
 
 import sys
-from bs4 import BeautifulSoup
+import re
 
 def parse_summary(html_path):
-    with open(html_path) as f:
-        soup = BeautifulSoup(f, "html.parser")
+    with open(html_path, 'r') as f:
+        html = f.read()
 
-    hostname = soup.find("strong", string="Host:").find_next().text
-    db_rows = soup.select("h2:contains('Database Summary') + table tr")[1:]  # Skip header row
-    listener_rows = soup.select("h2:contains('Listener Summary') + table tr")[1:]
+    # Extract hostname
+    host_match = re.search(r"<strong>Host:</strong>\s*(\S+)", html)
+    hostname = host_match.group(1) if host_match else "UNKNOWN"
 
-    db_summary = [tr.find_all("td") for tr in db_rows]
-    listener_summary = [tr.find_all("td") for tr in listener_rows]
+    # Count DB rows (skip header)
+    db_rows = re.findall(r'<tr>\s*<td><a href="#db-', html)
+    db_total = len(db_rows)
+    db_ok = len(re.findall(r'<td class="status-good">OPEN</td>', html))
 
-    db_ok = sum(1 for row in db_summary if "status-good" in str(row[3]))
-    db_total = len(db_summary)
+    # Count listener rows (skip header)
+    listener_rows = re.findall(r'<tr>\s*<td><a href="#listener-', html)
+    listener_total = len(listener_rows)
+    listener_ok = len(re.findall(r'<td class="status-good">UP</td>', html))
 
-    listeners_ok = sum(1 for row in listener_summary if "status-good" in str(row[1]))
-    listeners_total = len(listener_summary)
+    # Build plain text summary
+    summary = f"""Oracle Health Check Summary
+Host: {hostname}
+Databases: {db_ok} of {db_total} OK
+Listeners: {listener_ok} of {listener_total} OK
+"""
 
-    print(f"""
-    Oracle Health Check Summary
-    Host: {hostname}
-    Databases: {db_ok} of {db_total} OK
-    Listeners: {listeners_ok} of {listeners_total} OK
-    """)
+    print(summary.strip())
 
 if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: parse_report_summary.py <path_to_html_report>")
+        sys.exit(1)
+
     parse_summary(sys.argv[1])
