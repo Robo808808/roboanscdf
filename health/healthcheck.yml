@@ -57,6 +57,30 @@ script_path: "{{ role_path }}/files/codbcr-in.py"
   set_fact:
     local_report_path: "{{ fetched_report.dest }}"
 
+- name: Gather host metadata
+  shell: |
+    echo "hostname={{ ansible_hostname }}"
+    echo "os={{ ansible_distribution }} {{ ansible_distribution_version }}"
+    echo "kernel={{ ansible_kernel }}"
+    echo "uptime={{ uptime_output }}"
+  vars:
+    uptime_output: "{{ lookup('pipe', 'uptime -p') }}"
+  register: host_meta
+  changed_when: false
+
+- name: Save metadata to file for inclusion in report summary
+  copy:
+    dest: "{{ venv_dir }}/report_meta.txt"
+    content: |
+      {{ host_meta.stdout_lines | join('\n') }}
+
+- name: Fetch report metadata file to control machine
+  fetch:
+    src: "{{ venv_dir }}/report_meta.txt"
+    dest: "{{ playbook_dir }}/reports/report_meta_{{ inventory_hostname }}.txt"
+    flat: true
+  register: fetched_meta
+
 -- name: Parse summary and email report
    delegate_to: localhost
    run_once: true

@@ -3,28 +3,44 @@
 import sys
 import re
 import html
+import subprocess
 
 def extract_table_section(html_content, header_text):
-    """Extract table HTML for a given <h2> section"""
     pattern = rf"<h2>{re.escape(header_text)}</h2>\s*<table>(.*?)</table>"
     match = re.search(pattern, html_content, re.DOTALL | re.IGNORECASE)
     return match.group(1) if match else ""
 
 def count_good_status(table_html, status_marker):
-    """Count rows and how many match the good status"""
     rows = re.findall(r"<tr>(.*?)</tr>", table_html, re.DOTALL)
     data_rows = rows[1:]  # skip header row
     total = len(data_rows)
     good = sum(1 for row in data_rows if status_marker in row)
     return total, good
 
+def get_command_output(cmd, fallback="UNKNOWN"):
+    try:
+        return subprocess.check_output(cmd, shell=True, text=True).strip()
+    except Exception:
+        return fallback
+
+def get_host_metadata_from_file(meta_path):
+    meta = {"hostname": "UNKNOWN", "os": "UNKNOWN", "kernel": "UNKNOWN", "uptime": "UNKNOWN"}
+    try:
+        with open(meta_path) as f:
+            for line in f:
+                if "=" in line:
+                    key, value = line.strip().split("=", 1)
+                    meta[key] = html.escape(value)
+    except Exception:
+        pass
+    return meta
+
 def parse_summary(html_path):
     with open(html_path, 'r') as f:
         html_content = f.read()
 
-    # Hostname
-    host_match = re.search(r"<strong>Host:</strong>\s*(\S+)", html_content)
-    hostname = html.escape(host_match.group(1)) if host_match else "UNKNOWN"
+    # Get host metadata
+    meta = get_host_metadata_from_file(sys.argv[2])
 
     # Database Summary
     db_table = extract_table_section(html_content, "Database Summary")
@@ -49,7 +65,10 @@ def parse_summary(html_path):
 <html>
 <body>
     <h2>Oracle Health Check Summary</h2>
-    <p><strong>Host:</strong> {hostname}</p>
+    <p><strong>Host:</strong> {meta['hostname']}</p>
+    <p><strong>OS:</strong> {meta['os']}</p>
+    <p><strong>Kernel:</strong> {meta['kernel']}</p>
+    <p><strong>Uptime:</strong> {meta['uptime']}</p>
     {db_summary}
     {listener_summary}
 </body>
@@ -58,8 +77,8 @@ def parse_summary(html_path):
     print(html_summary.strip())
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: parse_report_summary.py <path_to_html_report>")
+    if len(sys.argv) != 3:
+        print("Usage: parse_report_summary.py <path_to_html_report> <path_to_meta_file>")
         sys.exit(1)
 
     parse_summary(sys.argv[1])
