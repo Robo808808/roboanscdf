@@ -1,0 +1,70 @@
+---
+- name: Check if TDE is enabled
+  ansible.builtin.shell: |
+    . ~/.bash_profile
+    echo "set heading off feedback off echo off verify off
+    select status from v\$encryption_wallet where rownum = 1;" | sqlplus -s / as sysdba
+  register: tde_status
+  changed_when: false
+  failed_when: false
+
+- name: Determine if TDE is enabled
+  ansible.builtin.set_fact:
+    tde_enabled: "{{ 'OPEN' in tde_status.stdout | upper }}"
+
+- name: Fail if TDE is enabled but keystore not found on control node
+  ansible.builtin.stat:
+    path: "/home/oracle/ansible/keystores/{{ inventory_hostname }}-{{ oracle_sid }}"
+  register: keystore_check
+  when: tde_enabled
+
+- name: Fail with message if keystore is missing
+  ansible.builtin.fail:
+    msg: >
+      TDE is enabled on {{ inventory_hostname }} (SID={{ oracle_sid }})
+      but required keystore directory was not found at
+      /home/oracle/ansible/keystores/{{ inventory_hostname }}-{{ oracle_sid }} on the control node.
+  when:
+    - tde_enabled
+    - not keystore_check.stat.exists
+
+- name: Ensure keystore destination path exists on target
+  ansible.builtin.file:
+    path: "/etc/oracle/keystores/autoupgrade/{{ oracle_sid }}"
+    state: directory
+    owner: oracle
+    group: oinstall
+    mode: '0700'
+  when: tde_enabled
+
+- name: Copy keystore from control node to target
+  ansible.builtin.copy:
+    src: "/home/oracle/ansible/keystores/{{ inventory_hostname }}-{{ oracle_sid }}/"
+    dest: "/etc/oracle/keystores/autoupgrade/{{ oracle_sid }}/"
+    owner: oracle
+    group: oinstall
+    mode: '0600'
+    remote_src: no
+  when: tde_enabled
+  recurse: yes
+
+- name: Generate autoupgrade.cfg with keystore path
+  ansible.builtin.template:
+    src: autoupgrade.cfg.j2
+    dest: "/etc/oracle/keystores/autoupgrade/{{ oracle_sid }}/autoupgrade.cfg"
+    mode: '0600'
+    owner: oracle
+    group: oinstall
+  when: tde_enabled
+
+
+
+---
+global.autoupg_log_dir=/tmp
+global.version=19
+global.keystore=/etc/oracle/keystores/autoupgrade/{{ inventory_hostname }}-{{ oracle_sid }}
+
+upg1.dbname={{ oracle_sid }}
+upg1.sid={{ oracle_sid }}
+upg1.source_home={{ oracle_home }}
+upg1.target_home={{ oracle_home }}
