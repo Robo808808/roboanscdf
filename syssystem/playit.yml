@@ -1,0 +1,168 @@
+---
+# roles/manage_sys/tasks/main.yml
+- name: Parse /etc/oratab and discover databases
+  shell: grep -Ev '^#|^$' /etc/oratab | cut -d: -f1
+  register: oratab_entries
+  changed_when: false
+
+- name: Set discovered DB list
+  set_fact:
+    discovered_dbs: "{{ oratab_entries.stdout_lines }}"
+
+- name: Loop over DBs to lock SYS and SYSTEM
+  become_user: "{{ oracle_user | default('oracle') }}"
+  loop: "{{ discovered_dbs }}"
+  loop_control:
+    loop_var: db_name
+  block:
+    - name: Lock SYS if not already locked
+      shell: |
+        . ~/.bash_profile
+        export ORACLE_SID={{ db_name }}
+        echo "SELECT account_status FROM dba_users WHERE username='SYS';" | sqlplus -S / as sysdba | grep -q 'LOCKED'
+        if [ $? -ne 0 ]; then
+          echo "ALTER USER SYS ACCOUNT LOCK;" | sqlplus -S / as sysdba
+        fi
+      changed_when: false
+
+    - name: Lock SYSTEM if not already locked
+      shell: |
+        . ~/.bash_profile
+        export ORACLE_SID={{ db_name }}
+        echo "SELECT account_status FROM dba_users WHERE username='SYSTEM';" | sqlplus -S / as sysdba | grep -q 'LOCKED'
+        if [ $? -ne 0 ]; then
+          echo "ALTER USER SYSTEM ACCOUNT LOCK;" | sqlplus -S / as sysdba
+        fi
+      changed_when: false
+
+    - name: Get SHA256 checksum of password file
+      stat:
+        path: "{{ oracle_home }}/dbs/orapw{{ db_name }}"
+        checksum_algorithm: sha256
+      register: pw_stat
+      tags: sync
+
+    - name: Set password file hash fact
+      set_fact:
+        "pwfile_{{ db_name }}": "{{ pw_stat.stat.checksum }}"
+      tags: sync
+
+# roles/manage_sys/tasks/detect_standbys.yml
+- name: Get Data Guard standby services
+  shell: |
+    . ~/.bash_profile
+    export ORACLE_SID={{ oracle_sid }}
+    echo "SELECT destination, service FROM v\$archive_dest WHERE target='STANDBY' AND status='VALID';" | sqlplus -S / as sysdba
+  register: dg_services_raw
+  changed_when: false
+
+- name: Extract standby service names
+  set_fact:
+    standby_services: >-
+      {{ dg_services_raw.stdout_lines | select('match', '^\w+') | list }}
+
+- name: Resolve standby hostnames from tnsnames.ora
+  shell: |
+    grep -A5 -i '{{ item }}' $ORACLE_HOME/network/admin/tnsnames.ora | grep HOST | head -1 | awk -F= '{ print $2 }' | tr -d ' )'
+  loop: "{{ standby_services }}"
+  register: resolved_standbys
+  changed_when: false
+
+- name: Set detected standby hosts
+  set_fact:
+    detected_standbys: "{{ resolved_standbys.results | map(attribute='stdout') | list }}"
+
+# roles/manage_sys/tasks/sync.yml
+- name: Sync password file to dynamically discovered standbys
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ hostvars[inventory_hostname]['detected_standbys'] | default([]) }}"
+  when: "hostvars[inventory_hostname]['discovered_dbs'] is defined"
+  block:
+    - name: Copy password file for each DB
+      loop: "{{ hostvars[inventory_hostname]['discovered_dbs'] }}"
+      loop_control:
+        loop_var: db_name
+      copy:
+        src: "{{ oracle_home }}/dbs/orapw{{ db_name }}"
+        dest: "{{ oracle_home }}/dbs/orapw{{ db_name }}"
+        owner: oracle
+        group: dba
+        mode: '0600'
+        remote_src: false
+
+# roles/manage_sys/tasks/manage_accounts.yml
+- name: Manage named DBA accounts for each database
+  become_user: "{{ oracle_user }}"
+  vars:
+    dba_accounts:
+      - username: DBA_123
+        password: "{{ vault_dba_123_password }}"
+        roles: [SYSDBA]
+      - username: DBA_321
+        password: "{{ vault_dba_321_password }}"
+        roles: [SYSBACKUP, DBA]
+  loop: "{{ discovered_dbs }}"
+  loop_control:
+    loop_var: db_name
+  block:
+    - name: Create or update DBA users and grant roles
+      with_items: "{{ dba_accounts }}"
+      loop_control:
+        loop_var: account
+      shell: |
+        . ~/.bash_profile
+        export ORACLE_SID={{ db_name }}
+        sqlplus -S / as sysdba <<EOF
+        DECLARE
+          user_exists INTEGER := 0;
+        BEGIN
+          SELECT COUNT(*) INTO user_exists FROM dba_users WHERE username = UPPER('{{ account.username }}');
+          IF user_exists = 0 THEN
+            EXECUTE IMMEDIATE 'CREATE USER {{ account.username }} IDENTIFIED BY "{{ account.password }}"';
+          ELSE
+            EXECUTE IMMEDIATE 'ALTER USER {{ account.username }} IDENTIFIED BY "{{ account.password }}"';
+          END IF;
+        END;
+        /
+        {% for role in account.roles %}
+        GRANT {{ role }} TO {{ account.username }};
+        {% endfor %}
+        EXIT
+        EOF
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+# roles/manage_sys/meta/main.yml
+---
+depends: []
+
+# site.yml
+---
+- name: Lock SYS/SYSTEM and compute password file hashes
+  hosts: all
+  become: yes
+  roles:
+    - role: manage_sys
+
+- name: Detect standby hosts from Data Guard config
+  hosts: primary_db_hosts
+  become: yes
+  roles:
+    - role: manage_sys
+      tasks_from: detect_standbys.yml
+
+- name: Sync password files to detected standby hosts
+  hosts: primary_db_hosts
+  become: yes
+  roles:
+    - role: manage_sys
+      tasks_from: sync.yml
+
+- name: Manage named DBA accounts
+  hosts: all
+  become: yes
+  roles:
+    - role: manage_sys
+      tasks_from: manage_accounts.yml
