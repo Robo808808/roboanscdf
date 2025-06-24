@@ -1,0 +1,115 @@
+---
+# roles/manage_sys/tasks/main.yml
+- name: Parse /etc/oratab and discover databases
+  shell: grep -Ev '^#|^$' /etc/oratab | cut -d: -f1
+  register: oratab_entries
+  changed_when: false
+
+- name: Set discovered DB list
+  set_fact:
+    discovered_dbs: "{{ oratab_entries.stdout_lines }}"
+
+- name: Loop over DBs to lock SYS and SYSTEM
+  become_user: "{{ oracle_user | default('oracle') }}"
+  loop: "{{ discovered_dbs }}"
+  loop_control:
+    loop_var: db_name
+  block:
+    - name: Lock SYS if not already locked
+      shell: |
+        . ~/.bash_profile
+        export ORACLE_SID={{ db_name }}
+        echo "SELECT account_status FROM dba_users WHERE username='SYS';" | sqlplus -S / as sysdba | grep -q 'LOCKED'
+        if [ $? -ne 0 ]; then
+          echo "ALTER USER SYS ACCOUNT LOCK;" | sqlplus -S / as sysdba
+        fi
+      changed_when: false
+
+    - name: Lock SYSTEM if not already locked
+      shell: |
+        . ~/.bash_profile
+        export ORACLE_SID={{ db_name }}
+        echo "SELECT account_status FROM dba_users WHERE username='SYSTEM';" | sqlplus -S / as sysdba | grep -q 'LOCKED'
+        if [ $? -ne 0 ]; then
+          echo "ALTER USER SYSTEM ACCOUNT LOCK;" | sqlplus -S / as sysdba
+        fi
+      changed_when: false
+
+    - name: Get SHA256 checksum of password file
+      stat:
+        path: "{{ oracle_home }}/dbs/orapw{{ db_name }}"
+        checksum_algorithm: sha256
+      register: pw_stat
+      tags: sync
+
+    - name: Set password file hash fact
+      set_fact:
+        "pwfile_{{ db_name }}": "{{ pw_stat.stat.checksum }}"
+      tags: sync
+
+# roles/manage_sys/tasks/sync.yml
+- name: Sync password file if needed (primary to standby)
+  when: "'standby_host' in hostvars[inventory_hostname]"
+  delegate_to: "{{ inventory_hostname }}"
+  run_once: true
+  block:
+    - name: Get list of DBs on primary
+      shell: grep -Ev '^#|^$' /etc/oratab | cut -d: -f1
+      register: primary_dbs
+      changed_when: false
+
+    - name: Copy password file to standby if checksums differ
+      become: true
+      loop: "{{ primary_dbs.stdout_lines }}"
+      loop_control:
+        loop_var: db_name
+      when: >
+        hostvars[inventory_hostname]['pwfile_' + db_name] is defined and
+        hostvars[hostvars[inventory_hostname]['standby_host']]['pwfile_' + db_name] is defined and
+        hostvars[inventory_hostname]['pwfile_' + db_name] != hostvars[hostvars[inventory_hostname]['standby_host']]['pwfile_' + db_name]
+      copy:
+        src: "{{ oracle_home }}/dbs/orapw{{ db_name }}"
+        dest: "{{ oracle_home }}/dbs/orapw{{ db_name }}"
+        owner: oracle
+        group: dba
+        mode: '0600'
+        remote_src: false
+        delegate_to: "{{ hostvars[inventory_hostname]['standby_host'] }}"
+
+# roles/manage_sys/meta/main.yml
+---
+depends: []
+
+# site.yml
+---
+- name: Lock SYS/SYSTEM and verify/sync password files
+  hosts: all
+  become: yes
+  roles:
+    - role: manage_sys
+
+- name: Sync password files if needed
+  hosts: prod,test,dev
+  gather_facts: false
+  roles:
+    - role: manage_sys
+      tasks_from: sync.yml
+
+
+all:
+  children:
+    prod:
+      hosts:
+        db01.prod.example.com:
+          role: primary
+          standby_host: db02.prod.example.com
+        db02.prod.example.com:
+          role: standby
+    test:
+      hosts:
+        db03.test.example.com:
+          role: primary
+    dev:
+      hosts:
+        db04.dev.example.com:
+          role: primary
