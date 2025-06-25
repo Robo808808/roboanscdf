@@ -185,10 +185,13 @@
     name: dba_accounts
 
 - name: Detect if DB is multitenant (CDB)
+  become: true
   become_user: oracle
+  vars:
+    oracle_home: "{{ sid_home_map[db_name] }}"
   shell: |
-    export ORACLE_SID={{ item }}
-    export ORACLE_HOME={{ sid_home_map[item] }}
+    export ORACLE_SID={{ db_name }}
+    export ORACLE_HOME={{ oracle_home }}
     export PATH=$ORACLE_HOME/bin:$PATH
     echo "SET HEADING OFF FEEDBACK OFF; SELECT CDB FROM V\$DATABASE;" | sqlplus -S / as sysdba
   loop: "{{ discovered_dbs }}"
