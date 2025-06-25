@@ -9,43 +9,46 @@
   set_fact:
     discovered_dbs: "{{ oratab_entries.stdout_lines }}"
 
-- name: Loop over DBs to lock SYS and SYSTEM
-  become_user: "{{ oracle_user | default('oracle') }}"
+- name: Loop over DBs and manage SYS/SYSTEM
+  include_tasks: tasks/lock_accounts.yml
   loop: "{{ discovered_dbs }}"
   loop_control:
     loop_var: db_name
-  block:
-    - name: Lock SYS if not already locked
-      shell: |
-        . ~/.bash_profile
-        export ORACLE_SID={{ db_name }}
-        echo "SELECT account_status FROM dba_users WHERE username='SYS';" | sqlplus -S / as sysdba | grep -q 'LOCKED'
-        if [ $? -ne 0 ]; then
-          echo "ALTER USER SYS ACCOUNT LOCK;" | sqlplus -S / as sysdba
-        fi
-      changed_when: false
+  become_user: "{{ oracle_user | default('oracle') }}"
 
-    - name: Lock SYSTEM if not already locked
-      shell: |
-        . ~/.bash_profile
-        export ORACLE_SID={{ db_name }}
-        echo "SELECT account_status FROM dba_users WHERE username='SYSTEM';" | sqlplus -S / as sysdba | grep -q 'LOCKED'
-        if [ $? -ne 0 ]; then
-          echo "ALTER USER SYSTEM ACCOUNT LOCK;" | sqlplus -S / as sysdba
-        fi
-      changed_when: false
+# tasks/lock_accounts.yml
 
-    - name: Get SHA256 checksum of password file
-      stat:
-        path: "{{ oracle_home }}/dbs/orapw{{ db_name }}"
-        checksum_algorithm: sha256
-      register: pw_stat
-      tags: sync
+- name: Lock SYS if not already locked
+  shell: |
+    . ~/.bash_profile
+    export ORACLE_SID={{ db_name }}
+    echo "SELECT account_status FROM dba_users WHERE username='SYS';" | sqlplus -S / as sysdba | grep -q 'LOCKED'
+    if [ $? -ne 0 ]; then
+      echo "ALTER USER SYS ACCOUNT LOCK;" | sqlplus -S / as sysdba
+    fi
+  changed_when: false
 
-    - name: Set password file hash fact
-      set_fact:
-        "pwfile_{{ db_name }}": "{{ pw_stat.stat.checksum }}"
-      tags: sync
+- name: Lock SYSTEM if not already locked
+  shell: |
+    . ~/.bash_profile
+    export ORACLE_SID={{ db_name }}
+    echo "SELECT account_status FROM dba_users WHERE username='SYSTEM';" | sqlplus -S / as sysdba | grep -q 'LOCKED'
+    if [ $? -ne 0 ]; then
+      echo "ALTER USER SYSTEM ACCOUNT LOCK;" | sqlplus -S / as sysdba
+    fi
+  changed_when: false
+
+- name: Get SHA256 checksum of password file
+  stat:
+    path: "{{ oracle_home }}/dbs/orapw{{ db_name }}"
+    checksum_algorithm: sha256
+  register: pw_stat
+  tags: sync
+
+- name: Set password file hash fact
+  set_fact:
+    "pwfile_{{ db_name }}": "{{ pw_stat.stat.checksum }}"
+  tags: sync
 
 # roles/manage_sys/tasks/detect_standbys.yml
 - name: Get Data Guard standby services
