@@ -199,7 +199,7 @@
 - name: Set CDB fact map per DB
   set_fact:
     is_cdb_map: >-
-      {{ dict(cdb_results.results | map(attribute='item') | zip(cdb_results.results | map(attribute='stdout') | map('trim') | map('equalto', 'YES'))) }}
+      {{ dict(cdb_results.results | map(attribute='item') | zip(cdb_results.results | map(attribute='stdout') | map('trim') | map('lower') | map('regex_search', '^yes') | map('bool'))) }}
 
 - name: Manage named DBA accounts
   become: true
@@ -212,7 +212,7 @@
     account_name: "{{ 'C##' + item.0.username if is_cdb else item.0.username }}"
     container_clause: "{{ 'CONTAINER=ALL' if is_cdb else '' }}"
     password_file: "{{ playbook_dir }}/group_vars/dba_accounts/{{ item.0.username }}.yml"
-    password_value: "{{ lookup('file', password_file) | from_yaml | dict2items | selectattr('key', 'equalto', item.0.password_var) | map(attribute='value') | list | first }}"
+    password_value: "{{ (lookup('file', password_file) | from_yaml)[item.0.password_var] }}"
   shell: |
     export ORACLE_SID={{ item.1 }}
     export ORACLE_HOME={{ sid_home_map[item.1] }}
