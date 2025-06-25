@@ -179,7 +179,6 @@
 
 # roles/manage_sys/tasks/manage_accounts.yml
 ---
-# roles/manage_sys/tasks/manage_accounts.yml
 - name: Load DBA account list
   include_vars:
     file: "{{ playbook_dir }}/group_vars/dba_accounts/dba_accounts_list.yml"
@@ -187,21 +186,36 @@
 
 - name: Detect if DB is multitenant (CDB)
   become_user: oracle
+  shell: |
+    export ORACLE_SID={{ item }}
+    export ORACLE_HOME={{ sid_home_map[item] }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    echo "SET HEADING OFF FEEDBACK OFF; SELECT CDB FROM V\$DATABASE;" | sqlplus -S / as sysdba
   loop: "{{ discovered_dbs }}"
   loop_control:
     loop_var: db_name
-  shell: |
-    export ORACLE_SID={{ db_name }}
-    export ORACLE_HOME={{ sid_home_map[db_name] }}
-    export PATH=$ORACLE_HOME/bin:$PATH
-    echo "SET HEADING OFF; SET FEEDBACK OFF; SELECT CDB FROM V$DATABASE;" | sqlplus -S / as sysdba
-  register: cdb_results
+  register: cdb_check_results
   changed_when: false
 
 - name: Set CDB fact map per DB
   set_fact:
     is_cdb_map: >-
-      {{ dict(cdb_results.results | map(attribute='item') | zip(cdb_results.results | map(attribute='stdout') | map('trim') | map('lower') | map('regex_search', '^yes') | map('bool'))) }}
+      {{
+        dict(
+          cdb_check_results.results | zip(
+            cdb_check_results.results |
+            map(attribute='stdout') |
+            map('trim') |
+            map('lower') |
+            map('regex_search', '^yes') |
+            map('bool')
+          ) | map('list')
+        )
+      }}
+
+- name: Ensure summary log file is reset
+  become: true
+  shell: rm -f /tmp/manage_accounts_summary.log
 
 - name: Manage named DBA accounts
   become: true
@@ -210,15 +224,13 @@
     dba_pairs: "{{ dba_accounts.dba_accounts | product(discovered_dbs) | list }}"
   loop: "{{ dba_pairs }}"
   loop_control:
-    label: "Managing user {{ item.0.username }} on DB {{ item.1 }}"
+    label: "Managing {{ item.0.username }} on {{ item.1 }}"
   vars:
+    account_name: "{{ 'C##' ~ item.0.username if is_cdb_map[item.1] | default(false) else item.0.username }}"
+    container_clause: "{{ 'CONTAINER=ALL' if is_cdb_map[item.1] | default(false) else '' }}"
     password_file: "{{ playbook_dir }}/group_vars/dba_accounts/{{ item.0.username }}.yml"
-    password_value: "{{ (lookup('file', password_file, errors='ignore') | from_yaml)['dba_password'] }}"
-    is_cdb: "{{ is_cdb_map[item.1] | default(false) }}"
-    account_name: "{{ 'C##' + item.0.username if is_cdb else item.0.username }}"
-    container_clause: "{{ 'CONTAINER=ALL' if is_cdb else '' }}"
+    password_value: "{{ (lookup('file', password_file) | from_yaml)[item.0.password_var] }}"
   shell: |
-    set -euo pipefail
     export ORACLE_SID={{ item.1 }}
     export ORACLE_HOME={{ sid_home_map[item.1] }}
     export PATH=$ORACLE_HOME/bin:$PATH
@@ -227,9 +239,9 @@
     LOG_FILE="/tmp/manage_{{ item.0.username }}_{{ item.1 }}.log"
     SUMMARY_FILE="/tmp/manage_accounts_summary.log"
 
-    sqlplus -s / as sysdba <<EOF > $LOG_FILE
-    SET FEEDBACK OFF;
-    SET HEADING OFF;
+    sqlplus -s / as sysdba > "$LOG_FILE" <<EOF
+    SET HEADING OFF
+    SET FEEDBACK OFF
     DECLARE
       user_exists NUMBER := 0;
       pw_change DATE := TO_DATE('1900-01-01','YYYY-MM-DD');
@@ -250,7 +262,7 @@
         END;
 
         IF pw_change < TO_DATE('{{ FILE_TIMESTAMP }}', 'YYYY-MM-DD HH24:MI:SS') THEN
-          EXECUTE IMMEDIATE 'ALTER USER {{ account_name }} IDENTIFIED BY "{{ password_value }}" ACCOUNT UNLOCK {{ container_clause }}';
+          EXECUTE IMMEDIATE 'ALTER USER {{ account_name }} IDENTIFIED BY "{{ password_value }}" ACCOUNT UNLOCK';
           action := 'Password updated';
         ELSE
           action := 'No change needed';
@@ -260,12 +272,13 @@
       DBMS_OUTPUT.PUT_LINE('Action: ' || action);
     END;
     /
-    GRANT {{ item.0.roles | map('regex_replace', '^(.*)$', '"\1"') | join(', ') }} TO {{ account_name }} {{ container_clause }};
-    EXIT;
-EOF
+    GRANT {{ item.0.roles | map('quote') | join(', ') }} TO {{ account_name }} {{ container_clause }};
+    EOF
 
-    ACTION_LINE=$(grep 'Action:' $LOG_FILE | awk -F: '{print $2}' | xargs)
-    echo "{{ account_name }} on {{ item.1 }}: $ACTION_LINE" >> $SUMMARY_FILE
+    ACTION_LINE=$(grep 'Action:' "$LOG_FILE" | awk -F: '{print $2}' | xargs | tr -d '"')
+    echo "{{ account_name }} on {{ item.1 }}: $ACTION_LINE" >> "$SUMMARY_FILE"
+  args:
+    executable: /bin/bash
 
 - name: Display consolidated DBA account actions summary
   become: true
@@ -276,9 +289,10 @@ EOF
   debug:
     msg: "{{ summary_output.stdout_lines }}"
 
+
 # roles/manage_sys/meta/main.yml
 ---
-depends: []
+dependencies: []
 
 # site.yml
 ---
