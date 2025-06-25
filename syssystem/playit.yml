@@ -258,7 +258,13 @@
     EXIT;
 EOF
 
-    grep 'Action:' $LOG_FILE | awk -F: '{print "{{ account_name }} on {{ item.1 }}: "$2}' >> $SUMMARY_FILE
+- name: Append account action to summary log
+  shell: |
+    ACTION_LINE=$(grep 'Action:' /tmp/manage_{{ item.0.username }}_{{ item.1 }}.log | awk -F: '{print $2}' | xargs)
+    echo "{{ account_name }} on {{ item.1 }}: $ACTION_LINE" >> /tmp/manage_accounts_summary.log
+  args:
+    executable: /bin/bash
+  when: item.0.username is defined and item.0.password_var is defined and item.0.roles is defined
 
 - name: Display consolidated DBA account actions summary
   become: true
