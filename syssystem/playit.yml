@@ -92,47 +92,68 @@
         remote_src: false
 
 # roles/manage_sys/tasks/manage_accounts.yml
-- name: Manage named DBA accounts for each database
-  become_user: "{{ oracle_user }}"
-  vars:
-    dba_accounts:
-      - username: DBA_123
-        password: "{{ vault_dba_123_password }}"
-        roles: [SYSDBA]
-      - username: DBA_321
-        password: "{{ vault_dba_321_password }}"
-        roles: [SYSBACKUP, DBA]
-  loop: "{{ discovered_dbs }}"
-  loop_control:
-    loop_var: db_name
-  block:
-    - name: Create or update DBA users and grant roles
-      with_items: "{{ dba_accounts }}"
-      loop_control:
-        loop_var: account
-      shell: |
-        . ~/.bash_profile
-        export ORACLE_SID={{ db_name }}
-        sqlplus -S / as sysdba <<EOF
-        DECLARE
-          user_exists INTEGER := 0;
+- name: Manage DBA accounts on each Oracle database
+  become: true
+  vars_files:
+    - "{{ playbook_dir }}/group_vars/dba_accounts/dba_accounts_list.yml"
+  shell: |
+    . /home/oracle/.bash_profile
+    export ORACLE_SID={{ item.1 }}
+    PASSWORD_FILE="{{ playbook_dir }}/group_vars/dba_accounts/DBA_{{ item.0.username | regex_replace('^DBA_', '') }}.yml"
+    FILE_TIMESTAMP=$(date -r "$PASSWORD_FILE" '+%Y-%m-%d %H:%M:%S')
+    LOG_FILE="/tmp/dba_account_actions_{{ item.0.username }}_{{ item.1 }}.log"
+    SUMMARY_FILE="/tmp/dba_account_actions_summary.log"
+
+    sqlplus -s / as sysdba <<EOF > \$LOG_FILE
+    SET FEEDBACK OFF
+    DECLARE
+      user_exists NUMBER;
+      pw_change_date DATE;
+      action_taken VARCHAR2(100);
+    BEGIN
+      SELECT COUNT(*) INTO user_exists FROM dba_users WHERE username = UPPER('{{ item.0.username }}');
+
+      IF user_exists = 0 THEN
+        EXECUTE IMMEDIATE 'CREATE USER {{ item.0.username }} IDENTIFIED BY "{{ lookup('vars', item.0.password_var) }}" ACCOUNT UNLOCK';
+        action_taken := 'User created';
+      ELSE
         BEGIN
-          SELECT COUNT(*) INTO user_exists FROM dba_users WHERE username = UPPER('{{ account.username }}');
-          IF user_exists = 0 THEN
-            EXECUTE IMMEDIATE 'CREATE USER {{ account.username }} IDENTIFIED BY "{{ account.password }}"';
-          ELSE
-            EXECUTE IMMEDIATE 'ALTER USER {{ account.username }} IDENTIFIED BY "{{ account.password }}"';
-          END IF;
+          SELECT password_change_date INTO pw_change_date FROM dba_users WHERE username = UPPER('{{ item.0.username }}');
+        EXCEPTION WHEN OTHERS THEN pw_change_date := TO_DATE('1900-01-01','YYYY-MM-DD');
         END;
-        /
-        {% for role in account.roles %}
-        GRANT {{ role }} TO {{ account.username }};
-        {% endfor %}
-        EXIT
-        EOF
-      args:
-        executable: /bin/bash
-      changed_when: false
+
+        IF pw_change_date < TO_DATE('{{ FILE_TIMESTAMP }}', 'YYYY-MM-DD HH24:MI:SS') THEN
+          EXECUTE IMMEDIATE 'ALTER USER {{ item.0.username }} IDENTIFIED BY "{{ lookup('vars', item.0.password_var) }}" ACCOUNT UNLOCK';
+          action_taken := 'Password updated';
+        ELSE
+          action_taken := 'No action: password is current';
+        END IF;
+      END IF;
+
+      DBMS_OUTPUT.PUT_LINE('Action: ' || action_taken);
+    END;
+    /
+    GRANT {{ item.0.roles | join(', ') }} TO {{ item.0.username }};
+    EXIT;
+    EOF
+
+    ACTION_RESULT=$(grep 'Action:' \$LOG_FILE | awk -F: '{print $2}' | xargs)
+    echo "{{ item.0.username }} on {{ item.1 }}: \$ACTION_RESULT" >> \$SUMMARY_FILE
+  loop: "{{ dba_accounts | product(databases) | list }}"
+  loop_control:
+    label: "Managing user {{ item.0.username }} on DB {{ item.1 }}"
+  when: item.0.username is defined and item.0.password_var is defined and item.0.roles is defined
+  vars:
+    databases: "{{ lookup('pipe', 'awk -F: \'/^[^#]/ { print $1 }\' /etc/oratab') | split('\n') }}"
+
+- name: Display consolidated DBA account actions summary
+  become: true
+  shell: cat /tmp/dba_account_actions_summary.log
+  register: summary_output
+
+- name: Show summary of DBA account management
+  debug:
+    msg: "{{ summary_output.stdout_lines }}"
 
 # roles/manage_sys/meta/main.yml
 ---
@@ -166,3 +187,61 @@ depends: []
   roles:
     - role: manage_sys
       tasks_from: manage_accounts.yml
+
+# Mangage_dba_pass.sh
+#!/bin/bash
+
+VAULT_DIR="group_vars/dba_accounts"
+VAULT_PASSWORD_FILE="${VAULT_PASSWORD_FILE:-~/.vault_pass}"
+
+# Prompt for DBA ID
+read -rp "Enter your DBA ID (numeric only, e.g., 123): " DBA_ID
+
+if ! [[ "$DBA_ID" =~ ^[0-9]+$ ]]; then
+  echo "❌ Invalid ID. Must be numeric."
+  exit 1
+fi
+
+VAULT_FILE="${VAULT_DIR}/DBA_${DBA_ID}.yml"
+VAR_NAME="vault_dba_${DBA_ID}_password"
+
+# Prompt for action
+echo "Choose action:"
+select ACTION in "Create New" "Update Existing" "Cancel"; do
+  case $REPLY in
+    1) break ;;
+    2) break ;;
+    3) echo "Cancelled."; exit 0 ;;
+    *) echo "Invalid option. Choose 1 or 2." ;;
+  esac
+done
+
+# Prompt for password securely
+read -rsp "Enter password for DBA_${DBA_ID}: " password1; echo
+read -rsp "Confirm password: " password2; echo
+
+if [[ "$password1" != "$password2" ]]; then
+  echo "❌ Passwords do not match."
+  exit 1
+fi
+
+# Create vault directory if missing
+mkdir -p "$VAULT_DIR"
+
+# Generate temp file
+TMPFILE=$(mktemp)
+echo "${VAR_NAME}: \"${password1}\"" > "$TMPFILE"
+
+# Encrypt into final vault file
+if [[ "$ACTION" == "Create New" && -f "$VAULT_FILE" ]]; then
+  echo "⚠️ Vault file already exists. Choose 'Update Existing' to change password."
+  rm -f "$TMPFILE"
+  exit 1
+fi
+
+ansible-vault encrypt "$TMPFILE" --output "$VAULT_FILE" --vault-password-file "$VAULT_PASSWORD_FILE"
+rm -f "$TMPFILE"
+
+echo "✅ Vault file saved as $VAULT_FILE"
+echo "🔐 Only you (with your password) can edit it:"
+echo "    ansible-vault edit $VAULT_FILE --vault-password-file $VAULT_PASSWORD_FILE"
