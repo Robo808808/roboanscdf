@@ -1,7 +1,21 @@
 ---
+# Directory structure
+# ├── playbook.yml
+# └── roles
+#     └── manage_sys
+#         ├── tasks
+#         │   ├── main.yml
+#         │   └── lock_accounts.yml
+
+# playbook.yml
+- hosts: all
+  gather_facts: false
+  roles:
+    - manage_sys
+
 # roles/manage_sys/tasks/main.yml
-- name: Read and parse /etc/oratab (non-commented, non-empty lines)
-  shell: "awk -F: '!/^#/ && NF >= 2 { print $1":"$2 }' /etc/oratab"
+- name: Read /etc/oratab entries (non-commented, non-empty)
+  shell: awk -F: '!/^#/ && NF >= 2 { print $1":"$2 }' /etc/oratab
   register: raw_oratab_lines
   changed_when: false
 
@@ -15,54 +29,39 @@
     sid_home_map: "{{ dict(sid_home_pairs) }}"
 
 - name: Loop over DBs and manage SYS/SYSTEM
-  include_tasks: tasks/lock_accounts.yml
+  include_tasks: lock_accounts.yml
   loop: "{{ discovered_dbs }}"
   loop_control:
     loop_var: db_name
   vars:
     oracle_home: "{{ sid_home_map[db_name] }}"
 
-# tasks/lock_accounts.yml
-
-- name: Lock SYS if not already locked
+# roles/manage_sys/tasks/lock_accounts.yml
+- name: Lock SYS account if not already locked
   become: true
   become_user: oracle
   shell: |
-    ORACLE_SID={{ db_name }}
-    ORACLE_HOME=$(awk -F: -v sid="${ORACLE_SID}" '$1 == sid { print $2 }' /etc/oratab)
-    PATH=$ORACLE_HOME/bin:$PATH
-    LD_LIBRARY_PATH=$ORACLE_HOME/lib
-    export ORACLE_SID ORACLE_HOME PATH LD_LIBRARY_PATH
-    STATUS=$(echo "SELECT account_status FROM dba_users WHERE username='SYS';" | $ORACLE_HOME/bin/sqlplus -S / as sysdba | grep -c 'LOCKED')
-    if [ "$STATUS" -eq 0 ]; then
-      echo "ALTER USER SYS ACCOUNT LOCK;" | $ORACLE_HOME/bin/sqlplus -S / as sysdba
+    export ORACLE_SID={{ db_name }}
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    echo "SELECT account_status FROM dba_users WHERE username='SYS';" | sqlplus -S / as sysdba | grep -q 'LOCKED'
+    if [ $? -ne 0 ]; then
+      echo "ALTER USER SYS ACCOUNT LOCK;" | sqlplus -S / as sysdba
     fi
   changed_when: false
 
-- name: Lock SYSTEM if not already locked
+- name: Lock SYSTEM account if not already locked
+  become: true
+  become_user: oracle
   shell: |
-    ORACLE_SID={{ db_name }}
-    ORACLE_HOME=$(awk -F: -v sid="${ORACLE_SID}" '$1 == sid { print $2 }' /etc/oratab)
-    PATH=$ORACLE_HOME/bin:$PATH
-    LD_LIBRARY_PATH=$ORACLE_HOME/lib
-    export ORACLE_SID ORACLE_HOME PATH LD_LIBRARY_PATH
+    export ORACLE_SID={{ db_name }}
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
     echo "SELECT account_status FROM dba_users WHERE username='SYSTEM';" | sqlplus -S / as sysdba | grep -q 'LOCKED'
     if [ $? -ne 0 ]; then
       echo "ALTER USER SYSTEM ACCOUNT LOCK;" | sqlplus -S / as sysdba
     fi
   changed_when: false
-
-- name: Get SHA256 checksum of password file
-  stat:
-    path: "{{ oracle_home }}/dbs/orapw{{ db_name }}"
-    checksum_algorithm: sha256
-  register: pw_stat
-  tags: sync
-
-- name: Set password file hash fact
-  set_fact:
-    "pwfile_{{ db_name }}": "{{ pw_stat.stat.checksum }}"
-  tags: sync
 
 # roles/manage_sys/tasks/detect_standbys.yml
 - name: Get Data Guard standby services
