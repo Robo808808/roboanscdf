@@ -19,19 +19,27 @@
 # tasks/lock_accounts.yml
 
 - name: Lock SYS if not already locked
+  become: true
+  become_user: oracle
   shell: |
-    . ~/.bash_profile
-    export ORACLE_SID={{ db_name }}
-    echo "SELECT account_status FROM dba_users WHERE username='SYS';" | sqlplus -S / as sysdba | grep -q 'LOCKED'
-    if [ $? -ne 0 ]; then
-      echo "ALTER USER SYS ACCOUNT LOCK;" | sqlplus -S / as sysdba
+    ORACLE_SID={{ db_name }}
+    ORACLE_HOME=$(awk -F: -v sid="${ORACLE_SID}" '$1 == sid { print $2 }' /etc/oratab)
+    PATH=$ORACLE_HOME/bin:$PATH
+    LD_LIBRARY_PATH=$ORACLE_HOME/lib
+    export ORACLE_SID ORACLE_HOME PATH LD_LIBRARY_PATH
+    STATUS=$(echo "SELECT account_status FROM dba_users WHERE username='SYS';" | $ORACLE_HOME/bin/sqlplus -S / as sysdba | grep -c 'LOCKED')
+    if [ "$STATUS" -eq 0 ]; then
+      echo "ALTER USER SYS ACCOUNT LOCK;" | $ORACLE_HOME/bin/sqlplus -S / as sysdba
     fi
   changed_when: false
 
 - name: Lock SYSTEM if not already locked
   shell: |
-    . ~/.bash_profile
-    export ORACLE_SID={{ db_name }}
+    ORACLE_SID={{ db_name }}
+    ORACLE_HOME=$(awk -F: -v sid="${ORACLE_SID}" '$1 == sid { print $2 }' /etc/oratab)
+    PATH=$ORACLE_HOME/bin:$PATH
+    LD_LIBRARY_PATH=$ORACLE_HOME/lib
+    export ORACLE_SID ORACLE_HOME PATH LD_LIBRARY_PATH
     echo "SELECT account_status FROM dba_users WHERE username='SYSTEM';" | sqlplus -S / as sysdba | grep -q 'LOCKED'
     if [ $? -ne 0 ]; then
       echo "ALTER USER SYSTEM ACCOUNT LOCK;" | sqlplus -S / as sysdba
