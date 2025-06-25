@@ -180,7 +180,6 @@
 # roles/manage_sys/tasks/manage_accounts.yml
 ---
 # roles/manage_sys/tasks/manage_accounts.yml
-
 - name: Load DBA account list
   include_vars:
     file: "{{ playbook_dir }}/group_vars/dba_accounts/dba_accounts_list.yml"
@@ -226,8 +225,9 @@
         FILE_TIMESTAMP=$(date -r "{{ password_file }}" '+%Y-%m-%d %H:%M:%S')
         LOG_FILE="/tmp/manage_{{ item.0.username }}_{{ item.1 }}.log"
 
-        sqlplus -s / as sysdba <<EOF > $LOG_FILE
-SET FEEDBACK OFF HEADING OFF
+        sqlplus -s / as sysdba > $LOG_FILE <<'EOF'
+SET FEEDBACK OFF
+SET HEADING OFF
 DECLARE
   user_exists NUMBER := 0;
   pw_change DATE := TO_DATE('1900-01-01','YYYY-MM-DD');
@@ -279,7 +279,6 @@ EOF
 - name: Show summary
   debug:
     msg: "{{ summary_output.stdout_lines }}"
-
 
 # roles/manage_sys/meta/main.yml
 ---
