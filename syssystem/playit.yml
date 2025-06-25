@@ -206,15 +206,8 @@
 - name: Manage named DBA accounts
   become: true
   become_user: oracle
-  loop: "{{ dba_accounts.dba_accounts | product(discovered_dbs) | list }}"
-  loop_control:
-    label: "Managing user {{ item.0.username }} on DB {{ item.1 }}"
   vars:
-    is_cdb: "{{ is_cdb_map[item.1] | default(false) }}"
-    account_name: "{{ 'C##' + item.0.username if is_cdb else item.0.username }}"
-    container_clause: "{{ 'CONTAINER=ALL' if is_cdb else '' }}"
-    password_file: "{{ playbook_dir }}/group_vars/dba_accounts/{{ item.0.username }}.yml"
-    password_value: "{{ (lookup('file', password_file) | from_yaml)[item.0.password_var] }}"
+    dba_pairs: "{{ dba_accounts.dba_accounts | product(discovered_dbs) | list }}"
   block:
     - name: Create or update DBA user
       shell: >
@@ -264,6 +257,15 @@
         EOF'
       args:
         executable: /bin/bash
+      vars:
+        is_cdb: "{{ is_cdb_map[item.1] | default(false) }}"
+        account_name: "{{ 'C##' + item.0.username if is_cdb else item.0.username }}"
+        container_clause: "{{ 'CONTAINER=ALL' if is_cdb else '' }}"
+        password_file: "{{ playbook_dir }}/group_vars/dba_accounts/{{ item.0.username }}.yml"
+        password_value: "{{ (lookup('file', password_file) | from_yaml)[item.0.password_var] }}"
+      loop: "{{ dba_pairs }}"
+      loop_control:
+        label: "Managing user {{ item.0.username }} on DB {{ item.1 }}"
 
     - name: Append account action to summary log
       shell: |
