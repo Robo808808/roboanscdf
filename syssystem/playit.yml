@@ -367,3 +367,5 @@ else
   exit 1
 fi
 
+ansible localhost -m debug -a "msg={{ lookup('file', 'group_vars/dba_accounts/DBA_123.yml') | from_yaml }}"
+--vault-id dba@/home/oracle/.vault_pass
