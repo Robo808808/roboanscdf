@@ -369,3 +369,30 @@ fi
 
 ansible localhost -m debug -a "msg={{ lookup('file', 'group_vars/dba_accounts/DBA_123.yml') | from_yaml }}"
 --vault-id dba@/home/oracle/.vault_pass
+
+mkdir -p group_vars/dba_accounts
+
+# Step 1: Create a plain YAML file
+cat <<EOF > group_vars/dba_accounts/DBA_123.yml
+dba_password: mySecretPass123
+EOF
+
+# Step 2: Encrypt it with the correct vault ID
+ansible-vault encrypt group_vars/dba_accounts/DBA_123.yml \
+  --vault-id dba_vault@/home/oracle/.vault_pass
+
+
+echo "test_var: secret" > test.yml
+ansible-vault encrypt test.yml --vault-id dba_vault@/home/oracle/.vault_pass
+ansible-vault view test.yml --vault-id dba_vault@/home/oracle/.vault_pass
+
+mkdir -p group_vars/dba_accounts
+
+# Step 1: Create a plain YAML file
+cat <<EOF > group_vars/dba_accounts/DBA_123.yml
+dba_password: mySecretPass123
+EOF
+
+# Step 2: Encrypt it with the correct vault ID
+ansible-vault encrypt group_vars/dba_accounts/DBA_123.yml \
+  --vault-id dba_vault@/home/oracle/.vault_pass
