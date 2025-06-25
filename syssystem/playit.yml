@@ -306,57 +306,45 @@ depends: []
 # Mangage_dba_pass.sh
 #!/bin/bash
 
+# === Script to securely create/update Ansible Vault files for DBA accounts ===
+
+echo "Enter your DBA ID (e.g. 123): "
+read -r DBA_ID
+
+# Validate: must be numeric
+if [[ ! "$DBA_ID" =~ ^[0-9]+$ ]]; then
+  echo "Error: DBA ID must be numeric"
+  exit 1
+fi
+
 VAULT_DIR="group_vars/dba_accounts"
-VAULT_PASSWORD_FILE="${VAULT_PASSWORD_FILE:-~/.vault_pass}"
-
-# Prompt for DBA ID
-read -rp "Enter your DBA ID (numeric only, e.g., 123): " DBA_ID
-
-if ! [[ "$DBA_ID" =~ ^[0-9]+$ ]]; then
-  echo "❌ Invalid ID. Must be numeric."
-  exit 1
-fi
-
 VAULT_FILE="${VAULT_DIR}/DBA_${DBA_ID}.yml"
-VAR_NAME="vault_dba_${DBA_ID}_password"
+VAULT_ID="dba_vault"
 
-# Prompt for action
-echo "Choose action:"
-select ACTION in "Create New" "Update Existing" "Cancel"; do
-  case $REPLY in
-    1) break ;;
-    2) break ;;
-    3) echo "Cancelled."; exit 0 ;;
-    *) echo "Invalid option. Choose 1 or 2." ;;
-  esac
-done
-
-# Prompt for password securely
-read -rsp "Enter password for DBA_${DBA_ID}: " password1; echo
-read -rsp "Confirm password: " password2; echo
-
-if [[ "$password1" != "$password2" ]]; then
-  echo "❌ Passwords do not match."
-  exit 1
-fi
-
-# Create vault directory if missing
 mkdir -p "$VAULT_DIR"
 
-# Generate temp file
-TMPFILE=$(mktemp)
-echo "${VAR_NAME}: \"${password1}\"" > "$TMPFILE"
+echo "Enter password for DBA_${DBA_ID}: "
+read -rs PASSWORD
+echo
+echo "Confirm password: "
+read -rs PASSWORD_CONFIRM
+echo
 
-# Encrypt into final vault file
-if [[ "$ACTION" == "Create New" && -f "$VAULT_FILE" ]]; then
-  echo "⚠️ Vault file already exists. Choose 'Update Existing' to change password."
-  rm -f "$TMPFILE"
+if [[ "$PASSWORD" != "$PASSWORD_CONFIRM" ]]; then
+  echo "Error: Passwords do not match"
   exit 1
 fi
 
-ansible-vault encrypt "$TMPFILE" --output "$VAULT_FILE" --vault-password-file "$VAULT_PASSWORD_FILE"
-rm -f "$TMPFILE"
+PASSWORD_VAR="dba_${DBA_ID}_password"
 
-echo "✅ Vault file saved as $VAULT_FILE"
-echo "🔐 Only you (with your password) can edit it:"
-echo "    ansible-vault edit $VAULT_FILE --vault-password-file $VAULT_PASSWORD_FILE"
+# Write vault-encrypted YAML with vault ID
+ansible-vault encrypt_string --vault-id "$VAULT_ID@prompt" "$PASSWORD" --name "$PASSWORD_VAR" > "$VAULT_FILE"
+
+# Check result
+if [[ $? -eq 0 ]]; then
+  echo "Vault file created/updated at $VAULT_FILE"
+  echo "Variable stored: $PASSWORD_VAR"
+else
+  echo "Error creating vault file"
+  exit 1
+fi
