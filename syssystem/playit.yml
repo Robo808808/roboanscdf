@@ -396,3 +396,49 @@ EOF
 # Step 2: Encrypt it with the correct vault ID
 ansible-vault encrypt group_vars/dba_accounts/DBA_123.yml \
   --vault-id dba_vault@/home/oracle/.vault_pass
+  
+  
+#!/bin/bash
+
+# Configuration
+VAULT_ID="dba_vault"
+VAULT_PASS_FILE="/home/oracle/.vault_pass"
+VAULT_DIR="group_vars/dba_accounts"
+VAR_NAME="dba_password"
+
+# Prompt for input
+read -p "Enter your DBA numeric ID (e.g. 123): " DBA_ID
+
+# Validate ID
+if [[ ! $DBA_ID =~ ^[0-9]+$ ]]; then
+  echo "❌ Invalid ID. Must be numeric."
+  exit 1
+fi
+
+# Prompt for password (hidden input)
+read -s -p "Enter password: " PASSWORD
+echo
+read -s -p "Confirm password: " CONFIRM
+echo
+
+if [[ "$PASSWORD" != "$CONFIRM" ]]; then
+  echo "❌ Passwords do not match."
+  exit 1
+fi
+
+# Prepare vault directory
+mkdir -p "$VAULT_DIR"
+
+# Generate temp YAML
+TMPFILE=$(mktemp)
+echo "$VAR_NAME: \"$PASSWORD\"" > "$TMPFILE"
+
+# Encrypt with vault ID
+VAULT_FILE="${VAULT_DIR}/DBA_${DBA_ID}.yml"
+ansible-vault encrypt "$TMPFILE" --output "$VAULT_FILE" \
+  --vault-id "$VAULT_ID@$VAULT_PASS_FILE"
+
+# Cleanup
+rm -f "$TMPFILE"
+
+echo "✅ Vault file created: $VAULT_FILE"
