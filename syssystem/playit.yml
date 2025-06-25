@@ -181,6 +181,9 @@
 - name: Load DBA account definitions
   include_vars: "{{ playbook_dir }}/group_vars/dba_accounts/dba_accounts_list.yml"
 
+- name: Load DBA password vars
+  include_vars: "{{ playbook_dir }}/vault/dba_passwords.yml"
+
 - name: Manage named DBA accounts
   become: true
   become_user: oracle
@@ -188,10 +191,18 @@
     export ORACLE_SID={{ item.1 }}
     export ORACLE_HOME={{ sid_home_map[item.1] }}
     export PATH=$ORACLE_HOME/bin:$PATH
-    PASS_FILE="{{ playbook_dir }}/group_vars/dba_accounts/{{ item.0.password_file }}"
-    PASS_TIMESTAMP=$(date -r "$PASS_FILE" '+%Y-%m-%d %H:%M:%S')
 
-    sqlplus -s / as sysdba <<EOF
+    PASSWORD="{{ lookup('vars', item.0.password_var) }}"
+    LOG_FILE="/tmp/dba_account_{{ item.0.username }}_{{ item.1 }}.log"
+    TIMESTAMP_FILE="{{ playbook_dir }}/vault/.timestamp_{{ item.0.password_var }}"
+
+    if [ ! -f "$TIMESTAMP_FILE" ]; then
+      touch -d '1900-01-01' "$TIMESTAMP_FILE"
+    fi
+
+    PASS_DATE=$(date -r "$TIMESTAMP_FILE" '+%Y-%m-%d %H:%M:%S')
+
+    sqlplus -s / as sysdba <<EOF > \$LOG_FILE
     SET FEEDBACK OFF HEADING OFF
     DECLARE
       user_exists NUMBER;
@@ -201,7 +212,7 @@
       SELECT COUNT(*) INTO user_exists FROM dba_users WHERE username = UPPER('{{ item.0.username }}');
 
       IF user_exists = 0 THEN
-        EXECUTE IMMEDIATE 'CREATE USER {{ item.0.username }} IDENTIFIED BY "{{ lookup('vars', item.0.password_var) }}" ACCOUNT UNLOCK';
+        EXECUTE IMMEDIATE 'CREATE USER {{ item.0.username }} IDENTIFIED BY "' || '{{ lookup('vars', item.0.password_var) }}' || '" ACCOUNT UNLOCK';
         action := 'User created';
       ELSE
         BEGIN
@@ -209,8 +220,8 @@
         EXCEPTION WHEN OTHERS THEN pw_change := TO_DATE('1900-01-01','YYYY-MM-DD');
         END;
 
-        IF pw_change < TO_DATE('{{ PASS_TIMESTAMP }}', 'YYYY-MM-DD HH24:MI:SS') THEN
-          EXECUTE IMMEDIATE 'ALTER USER {{ item.0.username }} IDENTIFIED BY "{{ lookup('vars', item.0.password_var) }}" ACCOUNT UNLOCK';
+        IF pw_change < TO_DATE('{{ PASS_DATE }}', 'YYYY-MM-DD HH24:MI:SS') THEN
+          EXECUTE IMMEDIATE 'ALTER USER {{ item.0.username }} IDENTIFIED BY "' || '{{ lookup('vars', item.0.password_var) }}' || '" ACCOUNT UNLOCK';
           action := 'Password updated';
         ELSE
           action := 'No change needed';
