@@ -199,7 +199,7 @@
 - name: Set CDB fact map per DB
   set_fact:
     is_cdb_map: >-
-      {{ dict(cdb_results.results | map(attribute='item') | zip(cdb_results.results | map(attribute='stdout') | map('trim') | map('lower') | map('regex_search', '^yes') | map('bool'))) }}
+      {{ dict(cdb_results.results | map(attribute='db_name') | zip(cdb_results.results | map(attribute='stdout') | map('trim') | map('lower') | map('regex_search', '^yes') | map('bool'))) }}
 
 - name: Manage named DBA accounts
   become: true
