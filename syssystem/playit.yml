@@ -255,16 +255,16 @@
           DBMS_OUTPUT.PUT_LINE('Action: ' || action);
         END;
         /
-        GRANT {{ item.0.roles | map('regex_replace', '^(.*)$', '"\1"') | join(', ') }} TO {{ account_name }} {{ container_clause }};
+        GRANT {{ item.0.roles | map('regex_replace', '^(.*)$', '"\\1"') | join(', ') }} TO {{ account_name }} {{ container_clause }};
         EXIT;
-EOF
+    EOF
 
     - name: Append account action to summary log
-      shell: |
-        ACTION_LINE=$(grep 'Action:' /tmp/manage_{{ item.0.username }}_{{ item.1 }}.log | awk -F: '{print $2}' | xargs)
-        echo "{{ account_name }} on {{ item.1 }}: $ACTION_LINE" >> /tmp/manage_accounts_summary.log
-      args:
-        executable: /bin/bash
+        shell: |
+          ACTION_LINE=$(grep 'Action:' /tmp/manage_{{ item.0.username }}_{{ item.1 }}.log | awk -F: '{print $2}' | xargs)
+          echo "{{ account_name }} on {{ item.1 }}: $ACTION_LINE" >> /tmp/manage_accounts_summary.log
+        args:
+          executable: /bin/bash
 
 - name: Display consolidated DBA account actions summary
   become: true
