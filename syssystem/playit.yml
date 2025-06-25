@@ -232,7 +232,7 @@
       DBMS_OUTPUT.PUT_LINE('Action: ' || action);
     END;
     /
-    GRANT {{ item.0.roles | join(', ') }} TO {{ item.0.username }};
+    GRANT {{ item.0.roles | map('regex_replace', '^(.*)$', '"\\1"') | join(', ') }} TO {{ item.0.username }};
     EXIT;
     EOF
 
