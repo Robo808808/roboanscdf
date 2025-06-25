@@ -181,48 +181,70 @@
 - name: Load DBA account list
   include_vars: "{{ playbook_dir }}/group_vars/dba_accounts/dba_accounts_list.yml"
 
+- name: Detect if DB is multitenant (CDB)
+  become_user: oracle
+  shell: |
+    export ORACLE_SID={{ item }}
+    export ORACLE_HOME={{ sid_home_map[item] }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    echo "SET HEADING OFF; SELECT CDB FROM V$DATABASE;" | sqlplus -S / as sysdba
+  loop: "{{ discovered_dbs }}"
+  loop_control:
+    loop_var: db_name
+  register: cdb_results
+  changed_when: false
+
+- name: Set CDB fact map per DB
+  set_fact:
+    is_cdb_map: >-
+      {{ dict(cdb_results.results | map(attribute='item') | zip(cdb_results.results | map(attribute='stdout') | map('trim') | map('equalto', 'YES'))) }}
+
 - name: Manage named DBA accounts
   become: true
   become_user: oracle
   vars:
-    password_file_path: "{{ playbook_dir }}/group_vars/dba_accounts/{{ item.0.username }}.yml"
-    password_file_var: "{{ item.0.password_var }}"
+    databases: "{{ discovered_dbs }}"
+  loop: "{{ dba_accounts | product(databases) | list }}"
+  loop_control:
+    label: "Managing user {{ item.0.username }} on DB {{ item.1 }}"
+  vars:
+    is_cdb: "{{ is_cdb_map[item.1] | default(false) }}"
+    account_name: "{{ 'C##' + item.0.username if is_cdb else item.0.username }}"
+    container_clause: "{{ 'CONTAINER=ALL' if is_cdb else '' }}"
+    password_file: "{{ playbook_dir }}/group_vars/dba_accounts/{{ item.0.username }}.yml"
+    password_value: "{{ lookup('file', password_file) | from_yaml | dict2items | selectattr('key', 'equalto', item.0.password_var) | map(attribute='value') | list | first }}"
   shell: |
     export ORACLE_SID={{ item.1 }}
     export ORACLE_HOME={{ sid_home_map[item.1] }}
     export PATH=$ORACLE_HOME/bin:$PATH
 
+    FILE_TIMESTAMP=$(date -r "$PASSWORD_FILE" '+%Y-%m-%d %H:%M:%S')
     LOG_FILE="/tmp/manage_{{ item.0.username }}_{{ item.1 }}.log"
     SUMMARY_FILE="/tmp/manage_accounts_summary.log"
 
-    if [ ! -f "{{ password_file_path }}" ]; then
-      echo "{{ item.0.username }} on {{ item.1 }}: ERROR - password file not found" >> $SUMMARY_FILE
-      exit 1
-    fi
-
-    FILE_TIMESTAMP=$(date -r "{{ password_file_path }}" '+%Y-%m-%d %H:%M:%S')
-
-    . ~/.bash_profile
-    sqlplus -s / as sysdba <<EOF > \$LOG_FILE
+    sqlplus -s / as sysdba <<EOF > $LOG_FILE
     SET FEEDBACK OFF HEADING OFF
     DECLARE
-      user_exists NUMBER;
-      pw_change DATE;
+      user_exists NUMBER := 0;
+      pw_change DATE := TO_DATE('1900-01-01','YYYY-MM-DD');
       action VARCHAR2(100);
     BEGIN
-      SELECT COUNT(*) INTO user_exists FROM dba_users WHERE username = UPPER('{{ item.0.username }}');
+      BEGIN
+        SELECT COUNT(*) INTO user_exists FROM dba_users WHERE username = UPPER('{{ account_name }}');
+      EXCEPTION WHEN OTHERS THEN user_exists := 0;
+      END;
 
       IF user_exists = 0 THEN
-        EXECUTE IMMEDIATE 'CREATE USER {{ item.0.username }} IDENTIFIED BY "{{ lookup('file', password_file_path) | from_yaml | dict2items | selectattr(\"key\", \"equalto\", password_file_var) | map(attribute=\"value\") | list | first }}" ACCOUNT UNLOCK';
+        EXECUTE IMMEDIATE 'CREATE USER {{ account_name }} IDENTIFIED BY "{{ password_value }}" {{ container_clause }} ACCOUNT UNLOCK';
         action := 'User created';
       ELSE
         BEGIN
-          SELECT password_change_date INTO pw_change FROM dba_users WHERE username = UPPER('{{ item.0.username }}');
-        EXCEPTION WHEN OTHERS THEN pw_change := TO_DATE('1900-01-01','YYYY-MM-DD');
+          SELECT password_change_date INTO pw_change FROM dba_users WHERE username = UPPER('{{ account_name }}');
+        EXCEPTION WHEN OTHERS THEN NULL;
         END;
 
         IF pw_change < TO_DATE('{{ FILE_TIMESTAMP }}', 'YYYY-MM-DD HH24:MI:SS') THEN
-          EXECUTE IMMEDIATE 'ALTER USER {{ item.0.username }} IDENTIFIED BY "{{ lookup('file', password_file_path) | from_yaml | dict2items | selectattr(\"key\", \"equalto\", password_file_var) | map(attribute=\"value\") | list | first }}" ACCOUNT UNLOCK';
+          EXECUTE IMMEDIATE 'ALTER USER {{ account_name }} IDENTIFIED BY "{{ password_value }}" ACCOUNT UNLOCK';
           action := 'Password updated';
         ELSE
           action := 'No change needed';
@@ -232,21 +254,18 @@
       DBMS_OUTPUT.PUT_LINE('Action: ' || action);
     END;
     /
-    GRANT {{ item.0.roles | map('regex_replace', '^(.*)$', '"\\1"') | join(', ') }} TO {{ item.0.username }};
+    GRANT {{ item.0.roles | map('regex_replace', '^(.*)$', '"\1"') | join(', ') }} TO {{ account_name }} {{ container_clause }};
     EXIT;
     EOF
 
-    grep 'Action:' \$LOG_FILE | awk -F: '{print "{{ item.0.username }} on {{ item.1 }}:" $2}' >> \$SUMMARY_FILE
-  loop: "{{ dba_accounts | product(discovered_dbs) | list }}"
-  loop_control:
-    label: "Managing {{ item.0.username }} on DB {{ item.1 }}"
+    grep 'Action:' $LOG_FILE | awk -F: '{print "{{ account_name }} on {{ item.1 }}: "$2}' >> $SUMMARY_FILE
 
 - name: Display consolidated DBA account actions summary
   become: true
-  shell: cat /tmp/manage_accounts_summary.log
+  shell: cat /tmp/manage_accounts_summary.log || echo "No actions performed."
   register: summary_output
 
-- name: Show summary of DBA account management
+- name: Show summary
   debug:
     msg: "{{ summary_output.stdout_lines }}"
 
