@@ -1,19 +1,34 @@
 ---
 # roles/manage_sys/tasks/main.yml
-- name: Parse /etc/oratab and discover databases
-  shell: grep -Ev '^#|^$' /etc/oratab | cut -d: -f1
-  register: oratab_entries
+- name: Parse /etc/oratab and build SID to ORACLE_HOME mapping
+  shell: |
+    awk -F: '/^[^#]/ && NF >= 2 { print $1 ":" $2 }' /etc/oratab
+  register: oratab_lines
   changed_when: false
 
-- name: Set discovered DB list
+- name: Set discovered DB list and SID → ORACLE_HOME map
   set_fact:
-    discovered_dbs: "{{ oratab_entries.stdout_lines }}"
+    discovered_dbs: >-
+      {{ oratab_lines.stdout_lines | map('split', ':') | map('first') | list }}
+    sid_home_map: >-
+      {{ dict(oratab_lines.stdout_lines | map('split', ':') | map('slice', 2)) }}
+
+- name: Debug discovered databases
+  debug:
+    var: discovered_dbs
+
+- name: Debug ORACLE_HOME map
+  debug:
+    var: sid_home_map
 
 - name: Loop over DBs and manage SYS/SYSTEM
   include_tasks: tasks/lock_accounts.yml
   loop: "{{ discovered_dbs }}"
   loop_control:
     loop_var: db_name
+  vars:
+    oracle_home: "{{ sid_home_map[db_name] }}"
+  become: true
   become_user: "{{ oracle_user | default('oracle') }}"
 
 # tasks/lock_accounts.yml
