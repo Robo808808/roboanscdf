@@ -178,41 +178,42 @@
 
 
 # roles/manage_sys/tasks/manage_accounts.yml
-- name: Load DBA account definitions
+- name: Load DBA account list
   include_vars: "{{ playbook_dir }}/group_vars/dba_accounts/dba_accounts_list.yml"
-
-- name: Load DBA password vars
-  include_vars: "{{ playbook_dir }}/vault/dba_passwords.yml"
 
 - name: Manage named DBA accounts
   become: true
   become_user: oracle
+  vars:
+    password_file_path: "{{ playbook_dir }}/group_vars/dba_accounts/{{ item.0.username }}.yml"
+    password_file_var: "{{ item.0.password_var }}"
   shell: |
     export ORACLE_SID={{ item.1 }}
     export ORACLE_HOME={{ sid_home_map[item.1] }}
     export PATH=$ORACLE_HOME/bin:$PATH
 
-    PASSWORD="{{ lookup('vars', item.0.password_var) }}"
-    LOG_FILE="/tmp/dba_account_{{ item.0.username }}_{{ item.1 }}.log"
-    TIMESTAMP_FILE="{{ playbook_dir }}/vault/.timestamp_{{ item.0.password_var }}"
+    LOG_FILE="/tmp/manage_{{ item.0.username }}_{{ item.1 }}.log"
+    SUMMARY_FILE="/tmp/manage_accounts_summary.log"
 
-    if [ ! -f "$TIMESTAMP_FILE" ]; then
-      touch -d '1900-01-01' "$TIMESTAMP_FILE"
+    if [ ! -f "{{ password_file_path }}" ]; then
+      echo "{{ item.0.username }} on {{ item.1 }}: ERROR - password file not found" >> $SUMMARY_FILE
+      exit 1
     fi
 
-    PASS_DATE=$(date -r "$TIMESTAMP_FILE" '+%Y-%m-%d %H:%M:%S')
+    FILE_TIMESTAMP=$(date -r "{{ password_file_path }}" '+%Y-%m-%d %H:%M:%S')
 
+    . ~/.bash_profile
     sqlplus -s / as sysdba <<EOF > \$LOG_FILE
     SET FEEDBACK OFF HEADING OFF
     DECLARE
       user_exists NUMBER;
       pw_change DATE;
-      action VARCHAR2(50);
+      action VARCHAR2(100);
     BEGIN
       SELECT COUNT(*) INTO user_exists FROM dba_users WHERE username = UPPER('{{ item.0.username }}');
 
       IF user_exists = 0 THEN
-        EXECUTE IMMEDIATE 'CREATE USER {{ item.0.username }} IDENTIFIED BY "' || '{{ lookup('vars', item.0.password_var) }}' || '" ACCOUNT UNLOCK';
+        EXECUTE IMMEDIATE 'CREATE USER {{ item.0.username }} IDENTIFIED BY "{{ lookup('file', password_file_path) | from_yaml | dict2items | selectattr(\"key\", \"equalto\", password_file_var) | map(attribute=\"value\") | list | first }}" ACCOUNT UNLOCK';
         action := 'User created';
       ELSE
         BEGIN
@@ -220,8 +221,8 @@
         EXCEPTION WHEN OTHERS THEN pw_change := TO_DATE('1900-01-01','YYYY-MM-DD');
         END;
 
-        IF pw_change < TO_DATE('{{ PASS_DATE }}', 'YYYY-MM-DD HH24:MI:SS') THEN
-          EXECUTE IMMEDIATE 'ALTER USER {{ item.0.username }} IDENTIFIED BY "' || '{{ lookup('vars', item.0.password_var) }}' || '" ACCOUNT UNLOCK';
+        IF pw_change < TO_DATE('{{ FILE_TIMESTAMP }}', 'YYYY-MM-DD HH24:MI:SS') THEN
+          EXECUTE IMMEDIATE 'ALTER USER {{ item.0.username }} IDENTIFIED BY "{{ lookup('file', password_file_path) | from_yaml | dict2items | selectattr(\"key\", \"equalto\", password_file_var) | map(attribute=\"value\") | list | first }}" ACCOUNT UNLOCK';
           action := 'Password updated';
         ELSE
           action := 'No change needed';
@@ -234,18 +235,21 @@
     GRANT {{ item.0.roles | join(', ') }} TO {{ item.0.username }};
     EXIT;
     EOF
+
+    grep 'Action:' \$LOG_FILE | awk -F: '{print "{{ item.0.username }} on {{ item.1 }}:" $2}' >> \$SUMMARY_FILE
   loop: "{{ dba_accounts | product(discovered_dbs) | list }}"
   loop_control:
     label: "Managing {{ item.0.username }} on DB {{ item.1 }}"
 
 - name: Display consolidated DBA account actions summary
   become: true
-  shell: cat /tmp/dba_account_actions_summary.log
+  shell: cat /tmp/manage_accounts_summary.log
   register: summary_output
 
 - name: Show summary of DBA account management
   debug:
     msg: "{{ summary_output.stdout_lines }}"
+
 
 # roles/manage_sys/meta/main.yml
 ---
