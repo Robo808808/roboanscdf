@@ -213,58 +213,58 @@
     container_clause: "{{ 'CONTAINER=ALL' if is_cdb else '' }}"
     password_file: "{{ playbook_dir }}/group_vars/dba_accounts/{{ item.0.username }}.yml"
     password_value: "{{ (lookup('file', password_file) | from_yaml)[item.0.password_var] }}"
-  shell: |
-    export ORACLE_SID={{ item.1 }}
-    export ORACLE_HOME={{ sid_home_map[item.1] }}
-    export PATH=$ORACLE_HOME/bin:$PATH
+  block:
+    - name: Create or update DBA user
+      shell: |
+        export ORACLE_SID={{ item.1 }}
+        export ORACLE_HOME={{ sid_home_map[item.1] }}
+        export PATH=$ORACLE_HOME/bin:$PATH
 
-    FILE_TIMESTAMP=$(date -r "$PASSWORD_FILE" '+%Y-%m-%d %H:%M:%S')
-    LOG_FILE="/tmp/manage_{{ item.0.username }}_{{ item.1 }}.log"
-    SUMMARY_FILE="/tmp/manage_accounts_summary.log"
+        FILE_TIMESTAMP=$(date -r "{{ password_file }}" '+%Y-%m-%d %H:%M:%S')
+        LOG_FILE="/tmp/manage_{{ item.0.username }}_{{ item.1 }}.log"
 
-    sqlplus -s / as sysdba <<EOF > $LOG_FILE
-    SET FEEDBACK OFF HEADING OFF
-    DECLARE
-      user_exists NUMBER := 0;
-      pw_change DATE := TO_DATE('1900-01-01','YYYY-MM-DD');
-      action VARCHAR2(100);
-    BEGIN
-      BEGIN
-        SELECT COUNT(*) INTO user_exists FROM dba_users WHERE username = UPPER('{{ account_name }}');
-      EXCEPTION WHEN OTHERS THEN user_exists := 0;
-      END;
-
-      IF user_exists = 0 THEN
-        EXECUTE IMMEDIATE 'CREATE USER {{ account_name }} IDENTIFIED BY "{{ password_value }}" {{ container_clause }} ACCOUNT UNLOCK';
-        action := 'User created';
-      ELSE
+        sqlplus -s / as sysdba <<EOF > $LOG_FILE
+        SET FEEDBACK OFF HEADING OFF
+        DECLARE
+          user_exists NUMBER := 0;
+          pw_change DATE := TO_DATE('1900-01-01','YYYY-MM-DD');
+          action VARCHAR2(100);
         BEGIN
-          SELECT password_change_date INTO pw_change FROM dba_users WHERE username = UPPER('{{ account_name }}');
-        EXCEPTION WHEN OTHERS THEN NULL;
+          BEGIN
+            SELECT COUNT(*) INTO user_exists FROM dba_users WHERE username = UPPER('{{ account_name }}');
+          EXCEPTION WHEN OTHERS THEN user_exists := 0;
+          END;
+
+          IF user_exists = 0 THEN
+            EXECUTE IMMEDIATE 'CREATE USER {{ account_name }} IDENTIFIED BY "{{ password_value }}" {{ container_clause }} ACCOUNT UNLOCK';
+            action := 'User created';
+          ELSE
+            BEGIN
+              SELECT password_change_date INTO pw_change FROM dba_users WHERE username = UPPER('{{ account_name }}');
+            EXCEPTION WHEN OTHERS THEN NULL;
+            END;
+
+            IF pw_change < TO_DATE('{{ FILE_TIMESTAMP }}', 'YYYY-MM-DD HH24:MI:SS') THEN
+              EXECUTE IMMEDIATE 'ALTER USER {{ account_name }} IDENTIFIED BY "{{ password_value }}" ACCOUNT UNLOCK';
+              action := 'Password updated';
+            ELSE
+              action := 'No change needed';
+            END IF;
+          END IF;
+
+          DBMS_OUTPUT.PUT_LINE('Action: ' || action);
         END;
-
-        IF pw_change < TO_DATE('{{ FILE_TIMESTAMP }}', 'YYYY-MM-DD HH24:MI:SS') THEN
-          EXECUTE IMMEDIATE 'ALTER USER {{ account_name }} IDENTIFIED BY "{{ password_value }}" ACCOUNT UNLOCK';
-          action := 'Password updated';
-        ELSE
-          action := 'No change needed';
-        END IF;
-      END IF;
-
-      DBMS_OUTPUT.PUT_LINE('Action: ' || action);
-    END;
-    /
-    GRANT {{ item.0.roles | map('regex_replace', '^(.*)$', '"\1"') | join(', ') }} TO {{ account_name }} {{ container_clause }};
-    EXIT;
+        /
+        GRANT {{ item.0.roles | map('regex_replace', '^(.*)$', '"\1"') | join(', ') }} TO {{ account_name }} {{ container_clause }};
+        EXIT;
 EOF
 
-- name: Append account action to summary log
-  shell: |
-    ACTION_LINE=$(grep 'Action:' /tmp/manage_{{ item.0.username }}_{{ item.1 }}.log | awk -F: '{print $2}' | xargs)
-    echo "{{ account_name }} on {{ item.1 }}: $ACTION_LINE" >> /tmp/manage_accounts_summary.log
-  args:
-    executable: /bin/bash
-  when: item.0.username is defined and item.0.password_var is defined and item.0.roles is defined
+    - name: Append account action to summary log
+      shell: |
+        ACTION_LINE=$(grep 'Action:' /tmp/manage_{{ item.0.username }}_{{ item.1 }}.log | awk -F: '{print $2}' | xargs)
+        echo "{{ account_name }} on {{ item.1 }}: $ACTION_LINE" >> /tmp/manage_accounts_summary.log
+      args:
+        executable: /bin/bash
 
 - name: Display consolidated DBA account actions summary
   become: true
