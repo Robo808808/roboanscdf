@@ -8,10 +8,16 @@
 
 - name: Set discovered DB list and SID → ORACLE_HOME map
   set_fact:
-    discovered_dbs: >-
-      {{ oratab_lines.stdout_lines | map('split', ':') | map('first') | list }}
+    discovered_dbs: "{{ oratab_lines.stdout_lines | map('split', ':') | map('first') | list }}"
     sid_home_map: >-
-      {{ dict(oratab_lines.stdout_lines | map('split', ':') | map('slice', 2)) }}
+      {{
+        dict(
+          zip(
+            oratab_lines.stdout_lines | map('split', ':') | map('first'),
+            oratab_lines.stdout_lines | map('split', ':') | map('nth', 1)
+          )
+        )
+      }}
 
 - name: Debug discovered databases
   debug:
