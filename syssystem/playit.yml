@@ -256,7 +256,7 @@
     /
     GRANT {{ item.0.roles | map('regex_replace', '^(.*)$', '"\1"') | join(', ') }} TO {{ account_name }} {{ container_clause }};
     EXIT;
-    EOF
+EOF
 
     grep 'Action:' $LOG_FILE | awk -F: '{print "{{ account_name }} on {{ item.1 }}: "$2}' >> $SUMMARY_FILE
 
