@@ -8,15 +8,15 @@
 
 - name: Set discovered DB list and SID → ORACLE_HOME map
   set_fact:
-    discovered_dbs: "{{ oratab_lines.stdout_lines | map('regex_replace', '^([^:]+):.*', '\\1') | list }}"
-    sid_home_map: >-
+    sid_home_pairs: >-
       {{
-        dict(
-          oratab_lines.stdout_lines |
-          map('regex_replace', '^([^:]+):([^:]+):.*', '\\1|\\2') |
-          map('split', '|')
-        )
+        oratab_lines.stdout_lines |
+        map('regex_replace', '^([^:]+):([^:]+):.*', '\\1|\\2') |
+        map('split', '|') |
+        list
       }}
+    discovered_dbs: "{{ sid_home_pairs | map('first') | list }}"
+    sid_home_map: "{{ dict(sid_home_pairs) }}"
 
 - name: Debug discovered databases
   debug:
