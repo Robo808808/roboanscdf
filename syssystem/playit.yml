@@ -1,7 +1,7 @@
 ---
 # roles/manage_sys/tasks/main.yml
-- name: Read /etc/oratab entries (non-commented, non-empty)
-  shell: awk -F: '$0 !~ /^#/ && NF >= 2 { print $1 ":" $2 }' /etc/oratab
+- name: Read and parse /etc/oratab (skip comments and blank lines)
+  shell: awk -F: '$0 !~ /^#/ && NF >= 2 { print $1":"$2 }' /etc/oratab
   register: oratab_lines
   changed_when: false
 
@@ -15,16 +15,16 @@
         | list
       }}
 
-- name: Set discovered_dbs and sid_home_map
+- name: Set discovered DB list and SID to ORACLE_HOME map
   set_fact:
     discovered_dbs: "{{ sid_home_pairs | map('first') | list }}"
     sid_home_map: "{{ dict(sid_home_pairs) }}"
 
-- name: Debug discovered databases
+- name: Debug discovered DBs
   debug:
     var: discovered_dbs
 
-- name: Debug ORACLE_HOME map
+- name: Debug SID to ORACLE_HOME map
   debug:
     var: sid_home_map
 
@@ -35,8 +35,6 @@
     loop_var: db_name
   vars:
     oracle_home: "{{ sid_home_map[db_name] }}"
-  become: true
-  become_user: "{{ oracle_user | default('oracle') }}"
 
 # tasks/lock_accounts.yml
 
