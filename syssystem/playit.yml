@@ -306,45 +306,51 @@ depends: []
 # Mangage_dba_pass.sh
 #!/bin/bash
 
-# === Script to securely create/update Ansible Vault files for DBA accounts ===
+# === Secure Vault Creator for DBA Passwords ===
 
-echo "Enter your DBA ID (e.g. 123): "
-read -r DBA_ID
+VAULT_ID="dba_vault"
+VAULT_PASS_FILE="/home/oracle/.vault_dba"
+VAULT_DIR="group_vars/dba_accounts"
 
-# Validate: must be numeric
+read -rp "Enter your numeric DBA ID (e.g. 123): " DBA_ID
+
+# Validate numeric ID
 if [[ ! "$DBA_ID" =~ ^[0-9]+$ ]]; then
-  echo "Error: DBA ID must be numeric"
+  echo "❌ Error: DBA ID must be numeric."
   exit 1
 fi
 
-VAULT_DIR="group_vars/dba_accounts"
-VAULT_FILE="${VAULT_DIR}/DBA_${DBA_ID}.yml"
-VAULT_ID="dba_vault"
+DBA_USER="DBA_${DBA_ID}"
+PASSWORD_VAR="dba_${DBA_ID}_password"
+VAULT_FILE="${VAULT_DIR}/${DBA_USER}.yml"
 
 mkdir -p "$VAULT_DIR"
 
-echo "Enter password for DBA_${DBA_ID}: "
-read -rs PASSWORD
+read -rsp "Enter password for ${DBA_USER}: " PASSWORD
 echo
-echo "Confirm password: "
-read -rs PASSWORD_CONFIRM
+read -rsp "Confirm password: " PASSWORD_CONFIRM
 echo
 
 if [[ "$PASSWORD" != "$PASSWORD_CONFIRM" ]]; then
-  echo "Error: Passwords do not match"
+  echo "❌ Error: Passwords do not match."
   exit 1
 fi
 
-PASSWORD_VAR="dba_${DBA_ID}_password"
+# Create encrypted vault file
+ansible-vault encrypt_string \
+  --vault-id "${VAULT_ID}@${VAULT_PASS_FILE}" \
+  "$PASSWORD" --name "$PASSWORD_VAR" > "$VAULT_FILE"
 
-# Write vault-encrypted YAML with vault ID
-ansible-vault encrypt_string --vault-id "$VAULT_ID@prompt" "$PASSWORD" --name "$PASSWORD_VAR" > "$VAULT_FILE"
+# Lock permissions to DBA user only
+chown "$USER":"oracle" "$VAULT_FILE"
+chmod 600 "$VAULT_FILE"
 
-# Check result
+# Done
 if [[ $? -eq 0 ]]; then
-  echo "Vault file created/updated at $VAULT_FILE"
-  echo "Variable stored: $PASSWORD_VAR"
+  echo "✅ Vault file created at: $VAULT_FILE"
+  echo "🔐 Vault variable: $PASSWORD_VAR"
 else
-  echo "Error creating vault file"
+  echo "❌ Failed to create vault file"
   exit 1
 fi
+
