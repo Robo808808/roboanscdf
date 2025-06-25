@@ -1,3 +1,57 @@
+# site.yml
+- name: Discover DBs
+  hosts: all
+  gather_facts: false
+  become: true
+  roles:
+    - manage_sys
+
+- name: Lock SYS/SYSTEM accounts
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Lock accounts per DB
+      include_role:
+        name: manage_sys
+        tasks_from: lock_accounts.yml
+      loop: "{{ discovered_dbs }}"
+      loop_control:
+        loop_var: db_name
+      vars:
+        oracle_home: "{{ sid_home_map[db_name] }}"
+
+- name: Detect standby hosts
+  hosts: primary_db_hosts
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Detect standby hostnames from Data Guard config
+      include_role:
+        name: manage_sys
+        tasks_from: detect_standbys.yml
+
+- name: Sync password files to standbys
+  hosts: primary_db_hosts
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Sync password files
+      include_role:
+        name: manage_sys
+        tasks_from: sync.yml
+
+- name: Manage named DBA accounts
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Manage user accounts per DB
+      include_role:
+        name: manage_sys
+        tasks_from: manage_accounts.yml
+
+
 ---
 - name: Parse /etc/oratab (non-commented, valid lines)
   shell: "awk -F: '$0 !~ /^#/ && NF >= 2 { print $1\":\"$2 }' /etc/oratab"
@@ -24,13 +78,26 @@
   debug:
     var: sid_home_map
 
-- name: Loop over DBs and manage SYS/SYSTEM
-  include_tasks: lock_accounts.yml
-  loop: "{{ discovered_dbs }}"
-  loop_control:
-    loop_var: db_name
-  vars:
-    oracle_home: "{{ sid_home_map[db_name] }}"
+# site.yml
+
+- name: Lock SYS/SYSTEM accounts
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Include database discovery logic
+      include_role:
+        name: manage_sys
+
+    - name: Lock SYS/SYSTEM for each DB
+      include_role:
+        name: manage_sys
+        tasks_from: lock_accounts.yml
+      loop: "{{ discovered_dbs }}"
+      loop_control:
+        loop_var: db_name
+      vars:
+        oracle_home: "{{ sid_home_map[db_name] }}"
 
 # lock_accounts.yml
 ---
