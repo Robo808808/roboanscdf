@@ -133,103 +133,99 @@
 
 
 # roles/manage_sys/tasks/detect_standbys.yml
-- name: Get Data Guard standby services
+- name: Detect standby destinations from Data Guard
+  become: true
+  become_user: oracle
   shell: |
-    . ~/.bash_profile
-    export ORACLE_SID={{ oracle_sid }}
-    echo "SELECT destination, service FROM v\$archive_dest WHERE target='STANDBY' AND status='VALID';" | sqlplus -S / as sysdba
-  register: dg_services_raw
+    export ORACLE_SID={{ item }}
+    export ORACLE_HOME={{ sid_home_map[item] }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    sqlplus -s / as sysdba <<EOF
+    SET FEEDBACK OFF HEADING OFF PAGESIZE 0
+    SELECT destination FROM v$archive_dest
+     WHERE target='STANDBY' AND status='VALID'
+       AND destination IS NOT NULL;
+    EXIT;
+    EOF
+  loop: "{{ discovered_dbs }}"
+  register: dg_destinations
   changed_when: false
 
-- name: Extract standby service names
+- name: Extract unique standby hostnames
   set_fact:
-    standby_services: >-
-      {{ dg_services_raw.stdout_lines | select('match', '^\w+') | list }}
-
-- name: Resolve standby hostnames from tnsnames.ora
-  shell: |
-    grep -A5 -i '{{ item }}' $ORACLE_HOME/network/admin/tnsnames.ora | grep HOST | head -1 | awk -F= '{ print $2 }' | tr -d ' )'
-  loop: "{{ standby_services }}"
-  register: resolved_standbys
-  changed_when: false
-
-- name: Set detected standby hosts
-  set_fact:
-    detected_standbys: "{{ resolved_standbys.results | map(attribute='stdout') | list }}"
+    detected_standbys: >-
+      {{ dg_destinations.results | map(attribute='stdout_lines') | list | flatten | map('regex_replace', '^.*@', '') | unique }}
 
 # roles/manage_sys/tasks/sync.yml
-- name: Sync password file to dynamically discovered standbys
+- name: Copy password files to each detected standby host
   become: true
   delegate_to: "{{ item }}"
-  loop: "{{ hostvars[inventory_hostname]['detected_standbys'] | default([]) }}"
-  when: "hostvars[inventory_hostname]['discovered_dbs'] is defined"
+  loop: "{{ detected_standbys | default([]) }}"
+  vars:
+    standby_host: "{{ item }}"
   block:
     - name: Copy password file for each DB
-      loop: "{{ hostvars[inventory_hostname]['discovered_dbs'] }}"
+      loop: "{{ discovered_dbs }}"
       loop_control:
         loop_var: db_name
       copy:
-        src: "{{ oracle_home }}/dbs/orapw{{ db_name }}"
-        dest: "{{ oracle_home }}/dbs/orapw{{ db_name }}"
+        src: "{{ sid_home_map[db_name] }}/dbs/orapw{{ db_name }}"
+        dest: "{{ sid_home_map[db_name] }}/dbs/orapw{{ db_name }}"
         owner: oracle
         group: dba
         mode: '0600'
         remote_src: false
 
-# roles/manage_sys/tasks/manage_accounts.yml
-- name: Manage DBA accounts on each Oracle database
-  become: true
-  vars_files:
-    - "{{ playbook_dir }}/group_vars/dba_accounts/dba_accounts_list.yml"
-  shell: |
-    . /home/oracle/.bash_profile
-    export ORACLE_SID={{ item.1 }}
-    PASSWORD_FILE="{{ playbook_dir }}/group_vars/dba_accounts/DBA_{{ item.0.username | regex_replace('^DBA_', '') }}.yml"
-    FILE_TIMESTAMP=$(date -r "$PASSWORD_FILE" '+%Y-%m-%d %H:%M:%S')
-    LOG_FILE="/tmp/dba_account_actions_{{ item.0.username }}_{{ item.1 }}.log"
-    SUMMARY_FILE="/tmp/dba_account_actions_summary.log"
 
-    sqlplus -s / as sysdba <<EOF > \$LOG_FILE
-    SET FEEDBACK OFF
+# roles/manage_sys/tasks/manage_accounts.yml
+- name: Load DBA account definitions
+  include_vars: "{{ playbook_dir }}/group_vars/dba_accounts/dba_accounts_list.yml"
+
+- name: Manage named DBA accounts
+  become: true
+  become_user: oracle
+  shell: |
+    export ORACLE_SID={{ item.1 }}
+    export ORACLE_HOME={{ sid_home_map[item.1] }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    PASS_FILE="{{ playbook_dir }}/group_vars/dba_accounts/{{ item.0.password_file }}"
+    PASS_TIMESTAMP=$(date -r "$PASS_FILE" '+%Y-%m-%d %H:%M:%S')
+
+    sqlplus -s / as sysdba <<EOF
+    SET FEEDBACK OFF HEADING OFF
     DECLARE
       user_exists NUMBER;
-      pw_change_date DATE;
-      action_taken VARCHAR2(100);
+      pw_change DATE;
+      action VARCHAR2(50);
     BEGIN
       SELECT COUNT(*) INTO user_exists FROM dba_users WHERE username = UPPER('{{ item.0.username }}');
 
       IF user_exists = 0 THEN
         EXECUTE IMMEDIATE 'CREATE USER {{ item.0.username }} IDENTIFIED BY "{{ lookup('vars', item.0.password_var) }}" ACCOUNT UNLOCK';
-        action_taken := 'User created';
+        action := 'User created';
       ELSE
         BEGIN
-          SELECT password_change_date INTO pw_change_date FROM dba_users WHERE username = UPPER('{{ item.0.username }}');
-        EXCEPTION WHEN OTHERS THEN pw_change_date := TO_DATE('1900-01-01','YYYY-MM-DD');
+          SELECT password_change_date INTO pw_change FROM dba_users WHERE username = UPPER('{{ item.0.username }}');
+        EXCEPTION WHEN OTHERS THEN pw_change := TO_DATE('1900-01-01','YYYY-MM-DD');
         END;
 
-        IF pw_change_date < TO_DATE('{{ FILE_TIMESTAMP }}', 'YYYY-MM-DD HH24:MI:SS') THEN
+        IF pw_change < TO_DATE('{{ PASS_TIMESTAMP }}', 'YYYY-MM-DD HH24:MI:SS') THEN
           EXECUTE IMMEDIATE 'ALTER USER {{ item.0.username }} IDENTIFIED BY "{{ lookup('vars', item.0.password_var) }}" ACCOUNT UNLOCK';
-          action_taken := 'Password updated';
+          action := 'Password updated';
         ELSE
-          action_taken := 'No action: password is current';
+          action := 'No change needed';
         END IF;
       END IF;
 
-      DBMS_OUTPUT.PUT_LINE('Action: ' || action_taken);
+      DBMS_OUTPUT.PUT_LINE('Action: ' || action);
     END;
     /
     GRANT {{ item.0.roles | join(', ') }} TO {{ item.0.username }};
     EXIT;
     EOF
-
-    ACTION_RESULT=$(grep 'Action:' \$LOG_FILE | awk -F: '{print $2}' | xargs)
-    echo "{{ item.0.username }} on {{ item.1 }}: \$ACTION_RESULT" >> \$SUMMARY_FILE
-  loop: "{{ dba_accounts | product(databases) | list }}"
+  loop: "{{ dba_accounts | product(discovered_dbs) | list }}"
   loop_control:
-    label: "Managing user {{ item.0.username }} on DB {{ item.1 }}"
-  when: item.0.username is defined and item.0.password_var is defined and item.0.roles is defined
-  vars:
-    databases: "{{ lookup('pipe', 'awk -F: \'/^[^#]/ { print $1 }\' /etc/oratab') | split('\n') }}"
+    label: "Managing {{ item.0.username }} on DB {{ item.1 }}"
 
 - name: Display consolidated DBA account actions summary
   become: true
