@@ -1,6 +1,6 @@
 ---
 # roles/manage_sys/tasks/main.yml
-- name: Read /etc/oratab entries (no comments, no blanks)
+- name: Read /etc/oratab entries (non-commented)
   shell: "awk -F: '!/^#/ && NF >= 2 { print $1\":\"$2 }' /etc/oratab"
   register: oratab_lines
   changed_when: false
@@ -10,12 +10,12 @@
     sid_home_pairs: >-
       {{
         oratab_lines.stdout_lines
-        | map('regex_replace', '^(.*):(.*)$', '\\1|\\2')
+        | map('regex_replace', '^(.*):(.*)$', '\\\\1|\\\\2')
         | map('split', '|')
         | list
       }}
 
-- name: Set discovered DBs and SID to HOME map
+- name: Set discovered DBs and SID → HOME map
   set_fact:
     discovered_dbs: "{{ sid_home_pairs | map('first') | list }}"
     sid_home_map: "{{ dict(sid_home_pairs) }}"
