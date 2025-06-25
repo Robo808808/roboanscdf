@@ -6,15 +6,18 @@
   register: oratab_lines
   changed_when: false
 
-- name: Set discovered DB list and SID → ORACLE_HOME map
+- name: Build SID → ORACLE_HOME pairs from /etc/oratab
   set_fact:
     sid_home_pairs: >-
       {{
-        oratab_lines.stdout_lines |
-        map('regex_replace', '^([^:]+):([^:]+):.*', '\\1|\\2') |
-        map('split', '|') |
-        list
+        oratab_lines.stdout_lines
+        | map('regex_replace', '^([^:]+):([^:]+):.*', '\\1|\\2')
+        | map('split', '|')
+        | list
       }}
+
+- name: Set discovered DB list and sid → home map
+  set_fact:
     discovered_dbs: "{{ sid_home_pairs | map('first') | list }}"
     sid_home_map: "{{ dict(sid_home_pairs) }}"
 
