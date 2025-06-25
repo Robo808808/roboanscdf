@@ -225,9 +225,9 @@
         FILE_TIMESTAMP=$(date -r "{{ password_file }}" '+%Y-%m-%d %H:%M:%S')
         LOG_FILE="/tmp/manage_{{ item.0.username }}_{{ item.1 }}.log"
 
-        sqlplus -s / as sysdba > $LOG_FILE <<'EOF'
-SET FEEDBACK OFF
-SET HEADING OFF
+        sqlplus -s / as sysdba > $LOG_FILE <<EOF
+SET FEEDBACK OFF;
+SET HEADING OFF;
 DECLARE
   user_exists NUMBER := 0;
   pw_change DATE := TO_DATE('1900-01-01','YYYY-MM-DD');
