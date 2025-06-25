@@ -1,18 +1,39 @@
 ---
-- name: Parse /etc/oratab (skip comments/blank lines)
+- name: Parse /etc/oratab (non-commented, valid lines)
   shell: "awk -F: '$0 !~ /^#/ && NF >= 2 { print $1\":\"$2 }' /etc/oratab"
   register: oratab_lines
   changed_when: false
 
-- name: Convert SID to HOME map
+- name: Create SID → ORACLE_HOME pairs
   set_fact:
     sid_home_pairs: "{{ oratab_lines.stdout_lines | map('split', ':') | list }}"
+
+- name: Set discovered DB list
+  set_fact:
     discovered_dbs: "{{ sid_home_pairs | map('first') | list }}"
+
+- name: Set SID to ORACLE_HOME map
+  set_fact:
     sid_home_map: "{{ dict(sid_home_pairs) }}"
 
-- debug: var=discovered_dbs
-- debug: var=sid_home_map
+- name: Debug discovered DBs
+  debug:
+    var: discovered_dbs
 
+- name: Debug SID to ORACLE_HOME map
+  debug:
+    var: sid_home_map
+
+- name: Loop over DBs and manage SYS/SYSTEM
+  include_tasks: lock_accounts.yml
+  loop: "{{ discovered_dbs }}"
+  loop_control:
+    loop_var: db_name
+  vars:
+    oracle_home: "{{ sid_home_map[db_name] }}"
+
+# lock_accounts.yml
+---
 - name: Lock SYS if not already locked
   become: true
   become_user: oracle
