@@ -179,13 +179,15 @@
 
 # roles/manage_sys/tasks/manage_accounts.yml
 - name: Load DBA account list
-  include_vars: "{{ playbook_dir }}/group_vars/dba_accounts/dba_accounts_list.yml"
+  include_vars:
+    file: "{{ playbook_dir }}/group_vars/dba_accounts/dba_accounts_list.yml"
+    name: dba_accounts
 
 - name: Detect if DB is multitenant (CDB)
   become_user: oracle
   shell: |
-    export ORACLE_SID={{ item }}
-    export ORACLE_HOME={{ sid_home_map[item] }}
+    export ORACLE_SID={{ db_name }}
+    export ORACLE_HOME={{ sid_home_map[db_name] }}
     export PATH=$ORACLE_HOME/bin:$PATH
     echo "SET HEADING OFF; SELECT CDB FROM V$DATABASE;" | sqlplus -S / as sysdba
   loop: "{{ discovered_dbs }}"
@@ -202,9 +204,7 @@
 - name: Manage named DBA accounts
   become: true
   become_user: oracle
-  vars:
-    databases: "{{ discovered_dbs }}"
-  loop: "{{ dba_accounts | product(databases) | list }}"
+  loop: "{{ dba_accounts.dba_accounts | product(discovered_dbs) | list }}"
   loop_control:
     label: "Managing user {{ item.0.username }} on DB {{ item.1 }}"
   vars:
