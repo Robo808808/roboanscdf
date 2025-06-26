@@ -495,3 +495,84 @@ LEFT JOIN (
     GROUP BY grantee
 ) p ON u.username = p.grantee
 ORDER BY u.username;
+
+
+#!/bin/bash
+
+# Configuration
+VAULT_ID="dba_vault"
+VAULT_PASS_FILE="/home/oracle/.vault_pass"
+VAULT_DIR="group_vars/dba_accounts"
+VAR_NAME="dba_password"
+
+# Valid roles
+VALID_ROLES=("sysdba" "sysbackup" "sysoper" "dba")
+
+# Prompt for input
+read -p "Enter your DBA numeric ID (e.g. 123): " DBA_ID
+
+# Validate ID
+if [[ ! $DBA_ID =~ ^[0-9]+$ ]]; then
+  echo "❌ Invalid ID. Must be numeric."
+  exit 1
+fi
+
+# Prompt for password (hidden input)
+read -s -p "Enter password: " PASSWORD
+echo
+read -s -p "Confirm password: " CONFIRM
+echo
+
+if [[ "$PASSWORD" != "$CONFIRM" ]]; then
+  echo "❌ Passwords do not match."
+  exit 1
+fi
+
+# Prompt for roles
+echo "Select one or more roles from the list (comma-separated): ${VALID_ROLES[*]}"
+read -p "Enter roles: " ROLES_INPUT
+
+# Validate roles
+IFS=',' read -ra ROLES_ARRAY <<< "$ROLES_INPUT"
+VALIDATED_ROLES=()
+for role in "${ROLES_ARRAY[@]}"; do
+  role_trimmed=$(echo "$role" | xargs)  # trim whitespace
+  if [[ " ${VALID_ROLES[*]} " =~ " ${role_trimmed} " ]]; then
+    VALIDATED_ROLES+=("$role_trimmed")
+  else
+    echo "❌ Invalid role: $role_trimmed"
+    exit 1
+  fi
+done
+
+# Convert roles to YAML list format
+ROLES_YAML=$(printf ", %s" "${VALIDATED_ROLES[@]}")
+ROLES_YAML="[${ROLES_YAML:2}]"  # remove leading comma and space
+
+# Prepare vault directory
+mkdir -p "$VAULT_DIR"
+
+# Generate temp YAML
+TMPFILE=$(mktemp)
+cat > "$TMPFILE" <<EOF
+- username: DBA_${DBA_ID}
+  roles: $ROLES_YAML
+  password_var: $VAR_NAME
+EOF
+
+# Encrypt password as separate variable
+VAULT_FILE="${VAULT_DIR}/DBA_${DBA_ID}.yml"
+TMPPASS=$(mktemp)
+echo "$VAR_NAME: \"$PASSWORD\"" > "$TMPPASS"
+
+# Encrypt and combine
+ansible-vault encrypt "$TMPPASS" --output "$VAULT_FILE" \
+  --vault-id "$VAULT_ID@$VAULT_PASS_FILE"
+
+# Append the YAML metadata
+cat "$TMPFILE" >> "$VAULT_FILE"
+
+# Cleanup
+rm -f "$TMPFILE" "$TMPPASS"
+
+echo "✅ Vault file created: $VAULT_FILE"
