@@ -565,14 +565,19 @@ fi
 TMPYAML=$(mktemp)
 FOUND=0
 UPDATED=0
-BLOCK_FOUND=0
+IN_BLOCK=0
+HEADER_WRITTEN=0
 
-# Read and write logic block-by-block
 {
-  echo "dba_accounts:"
   while read -r line; do
+    if [[ "$line" =~ ^[[:space:]]*dba_accounts: ]]; then
+      echo "dba_accounts:"
+      HEADER_WRITTEN=1
+      continue
+    fi
+
     if [[ "$line" =~ ^[[:space:]]*-[[:space:]]username: ]]; then
-      BLOCK_FOUND=1
+      IN_BLOCK=1
       USER_LINE="$line"
       read -r ROLES_LINE
       read -r PASS_LINE
@@ -584,9 +589,9 @@ BLOCK_FOUND=0
         FOUND=1
         INPUT_ROLES_JOINED=$(IFS=, ; echo "${VALIDATED_ROLES[*]}" | tr -d ' ')
         if [[ "$CURRENT_ROLES" == "$INPUT_ROLES_JOINED" ]]; then
-          echo "$USER_LINE"
-          echo "$ROLES_LINE"
-          echo "$PASS_LINE"
+          echo "  - username: $CURRENT_USER"
+          echo "    roles: [$CURRENT_ROLES]"
+          echo "    password_var: $VAR_NAME"
           echo "✅ Entry for $USERNAME already exists with same roles. Skipping update." >&2
         else
           UPDATED=1
@@ -600,13 +605,18 @@ BLOCK_FOUND=0
         echo "$ROLES_LINE"
         echo "$PASS_LINE"
       fi
-    elif [[ "$BLOCK_FOUND" -eq 0 ]]; then
-      echo "$line"
+    else
+      if [[ "$IN_BLOCK" -eq 0 && "$HEADER_WRITTEN" -eq 0 ]]; then
+        echo "$line"
+      fi
     fi
   done < "$VAULT_FILE_LIST"
 
-  # Append if user not found
+  # Append if not found
   if [[ "$FOUND" -eq 0 ]]; then
+    if [[ "$HEADER_WRITTEN" -eq 0 ]]; then
+      echo "dba_accounts:"
+    fi
     echo "  - username: $USERNAME"
     echo "    roles: $ROLES_YAML"
     echo "    password_var: $VAR_NAME"
