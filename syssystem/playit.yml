@@ -463,3 +463,35 @@ ansible-vault encrypt "$TMPFILE" --output "$VAULT_FILE" \
 rm -f "$TMPFILE"
 
 echo "✅ Vault file created: $VAULT_FILE"
+
+
+SELECT
+    u.username,
+    u.account_status,
+    u.lock_date,
+    u.expiry_date,
+    u.created,
+    u.profile,
+    u.authentication_type,
+    u.last_login,
+    lpt.password_change_time AS last_password_change,
+    r.roles,
+    p.system_privileges
+FROM
+    dba_users u
+LEFT JOIN (
+    SELECT username, MAX(password_change_time) AS password_change_time
+    FROM dba_users_with_defpwd
+    GROUP BY username
+) lpt ON u.username = lpt.username
+LEFT JOIN (
+    SELECT grantee, LISTAGG(granted_role, ', ') WITHIN GROUP (ORDER BY granted_role) AS roles
+    FROM dba_role_privs
+    GROUP BY grantee
+) r ON u.username = r.grantee
+LEFT JOIN (
+    SELECT grantee, LISTAGG(privilege, ', ') WITHIN GROUP (ORDER BY privilege) AS system_privileges
+    FROM dba_sys_privs
+    GROUP BY grantee
+) p ON u.username = p.grantee
+ORDER BY u.username;
