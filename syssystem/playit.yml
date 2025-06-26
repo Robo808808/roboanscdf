@@ -697,3 +697,214 @@ if updated:
         tmp_path = tmpf.name
     shutil.move(tmp_path, VAULT_FILE_LIST)
     print(f"✅ Updated: {VAULT_FILE_LIST}")
+
+
+
+
+
+
+#!/bin/bash
+
+# Configuration
+VAULT_ID="dba_vault"
+VAULT_PASS_FILE="/home/oracle/.vault_pass"
+VAULT_DIR="group_vars/dba_accounts"
+VAULT_LIST_SCRIPT="./manage_dba_accounts.py"
+VAR_NAME="dba_password"
+VALID_ROLES=("SYSDBA" "SYSBACKUP" "SYSOPER" "DBA")
+
+# === DELETE MODE ===
+if [[ "$1" == "--delete" && -n "$2" ]]; then
+  DBA_ID="$2"
+  USERNAME="DBA_${DBA_ID}"
+  if [[ ! -x "$VAULT_LIST_SCRIPT" ]]; then
+    echo "❌ Python script not found or not executable: $VAULT_LIST_SCRIPT"
+    exit 1
+  fi
+  "$VAULT_LIST_SCRIPT" --delete "$DBA_ID"
+  exit $?
+fi
+
+# === CREATE/UPDATE MODE ===
+
+# Prompt for DBA ID
+read -p "Enter your DBA numeric ID (e.g. 123): " DBA_ID
+if [[ ! $DBA_ID =~ ^[0-9]+$ ]]; then
+  echo "❌ Invalid ID. Must be numeric."
+  exit 1
+fi
+
+USERNAME="DBA_${DBA_ID}"
+
+# Prompt for password
+read -s -p "Enter password: " PASSWORD
+echo
+read -s -p "Confirm password: " CONFIRM
+echo
+if [[ "$PASSWORD" != "$CONFIRM" ]]; then
+  echo "❌ Passwords do not match."
+  exit 1
+fi
+
+# Prompt for roles
+echo "Available roles: ${VALID_ROLES[*]}"
+read -p "Enter roles (comma-separated): " ROLES_INPUT
+
+IFS=',' read -ra ROLES_ARRAY <<< "$ROLES_INPUT"
+VALIDATED_ROLES=()
+for role in "${ROLES_ARRAY[@]}"; do
+  role_trimmed=$(echo "$role" | xargs | tr '[:lower:]' '[:upper:]')
+  if [[ " ${VALID_ROLES[*]} " =~ " ${role_trimmed} " ]]; then
+    VALIDATED_ROLES+=("$role_trimmed")
+  else
+    echo "❌ Invalid role: $role_trimmed"
+    exit 1
+  fi
+done
+
+ROLES_CSV=$(IFS=','; echo "${VALIDATED_ROLES[*]}")
+
+# Encrypt password into vault
+mkdir -p "$VAULT_DIR"
+VAULT_FILE="${VAULT_DIR}/${USERNAME}.yml"
+TMPPASS=$(mktemp)
+echo "$VAR_NAME: \"$PASSWORD\"" > "$TMPPASS"
+
+ansible-vault encrypt "$TMPPASS" --output "$VAULT_FILE" \
+  --vault-id "$VAULT_ID@$VAULT_PASS_FILE"
+rm -f "$TMPPASS"
+echo "✅ Password vault saved to: $VAULT_FILE"
+
+# Update metadata using Python
+if [[ ! -x "$VAULT_LIST_SCRIPT" ]]; then
+  echo "❌ Python script not found or not executable: $VAULT_LIST_SCRIPT"
+  exit 1
+fi
+
+"$VAULT_LIST_SCRIPT" "$USERNAME" "$ROLES_CSV"
+
+
+
+#!/usr/bin/env python3
+
+import yaml
+import sys
+from pathlib import Path
+from datetime import datetime
+from tempfile import NamedTemporaryFile
+import shutil
+import os
+
+# === CONFIGURATION ===
+VAULT_DIR = Path("group_vars/dba_accounts")
+VAULT_FILE_LIST = VAULT_DIR / "dba_accounts_list.yml"
+PASSWORD_VAR = "dba_password"
+
+# === FUNCTIONS ===
+
+def load_yaml_file(path):
+    if not path.exists():
+        return {'dba_accounts': []}
+    with path.open("r") as f:
+        try:
+            return yaml.safe_load(f) or {'dba_accounts': []}
+        except yaml.YAMLError as e:
+            print(f"❌ YAML read error: {e}")
+            sys.exit(1)
+
+def backup_file(path):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = path.with_suffix(f".yml.bak.{timestamp}")
+    shutil.copy2(path, backup)
+    print(f"📦 Backup saved as: {backup}")
+    return backup
+
+def write_yaml_safely(data, path):
+    with NamedTemporaryFile("w", delete=False) as tmpf:
+        yaml.dump(data, tmpf, default_flow_style=False)
+    shutil.move(tmpf.name, path)
+    print(f"✅ YAML written to: {path}")
+
+def ensure_dir():
+    VAULT_DIR.mkdir(parents=True, exist_ok=True)
+    if not VAULT_FILE_LIST.exists():
+        VAULT_FILE_LIST.write_text("dba_accounts: []\n")
+
+# === ADD or UPDATE ===
+def add_or_update_user(username, roles):
+    data = load_yaml_file(VAULT_FILE_LIST)
+    input_roles_set = set(role.upper() for role in roles)
+
+    for idx, entry in enumerate(data['dba_accounts']):
+        if entry['username'] == username:
+            entry_roles = set(role.upper() for role in entry.get('roles', []))
+            if entry_roles == input_roles_set and entry.get('status', 'active') == 'active':
+                print(f"✅ {username} already exists with same roles and status. No changes.")
+                return
+            else:
+                data['dba_accounts'][idx] = {
+                    'username': username,
+                    'roles': sorted(input_roles_set),
+                    'password_var': PASSWORD_VAR,
+                    'status': 'active'
+                }
+                print(f"🔁 Updated roles/status for {username}.")
+                break
+    else:
+        data['dba_accounts'].append({
+            'username': username,
+            'roles': sorted(input_roles_set),
+            'password_var': PASSWORD_VAR,
+            'status': 'active'
+        })
+        print(f"➕ Added new entry for {username}.")
+
+    backup_file(VAULT_FILE_LIST)
+    write_yaml_safely(data, VAULT_FILE_LIST)
+
+# === DELETE ===
+def delete_user(dba_id):
+    username = f"DBA_{dba_id}"
+    vault_file = VAULT_DIR / f"{username}.yml"
+    data = load_yaml_file(VAULT_FILE_LIST)
+    found = False
+
+    for idx, entry in enumerate(data['dba_accounts']):
+        if entry['username'] == username:
+            data['dba_accounts'][idx]['status'] = 'inactive'
+            found = True
+            break
+
+    if not found:
+        print(f"⚠️ No entry found for {username} in dba_accounts_list.yml.")
+    else:
+        print(f"🛑 Marked {username} as inactive in dba_accounts_list.yml.")
+
+    if vault_file.exists():
+        os.remove(vault_file)
+        print(f"🗑️  Deleted vault file: {vault_file}")
+    else:
+        print(f"⚠️ Vault file not found: {vault_file}")
+
+    backup_file(VAULT_FILE_LIST)
+    write_yaml_safely(data, VAULT_FILE_LIST)
+
+# === MAIN ENTRY ===
+def main():
+    ensure_dir()
+
+    if len(sys.argv) >= 3 and sys.argv[1] == "--delete":
+        dba_id = sys.argv[2]
+        delete_user(dba_id)
+    elif len(sys.argv) == 3:
+        username = sys.argv[1]
+        roles = sys.argv[2].split(",")
+        add_or_update_user(username, roles)
+    else:
+        print("Usage:")
+        print("  To add/update: manage_dba_accounts.py DBA_<ID> SYSDBA,DBA")
+        print("  To delete:     manage_dba_accounts.py --delete <ID>")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
