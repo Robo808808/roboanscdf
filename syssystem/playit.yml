@@ -205,14 +205,15 @@
     is_cdb_map: >-
       {{
         dict(
-          cdb_check_results.results | zip(
+          cdb_check_results.results | map(attribute='invocation.module_args.db_name') |
+          zip(
             cdb_check_results.results |
             map(attribute='stdout') |
             map('trim') |
             map('lower') |
             map('regex_search', '^yes') |
             map('bool')
-          ) | map('list')
+          )
         )
       }}
 
