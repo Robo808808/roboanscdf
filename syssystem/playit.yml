@@ -497,15 +497,67 @@ LEFT JOIN (
 ORDER BY u.username;
 
 
+#!/usr/bin/env python3
+import yaml
+import sys
+from pathlib import Path
+
+VAULT_FILE_LIST = Path("group_vars/dba_accounts/dba_accounts_list.yml")
+
+username = sys.argv[1]
+roles_input = sys.argv[2].split(",")
+password_var = "dba_password"
+
+VAULT_FILE_LIST.parent.mkdir(parents=True, exist_ok=True)
+if not VAULT_FILE_LIST.exists():
+    VAULT_FILE_LIST.write_text("dba_accounts: []\n")
+
+with VAULT_FILE_LIST.open("r") as f:
+    data = yaml.safe_load(f)
+
+if not data or 'dba_accounts' not in data:
+    data = {'dba_accounts': []}
+
+input_roles_set = set(role.upper() for role in roles_input)
+updated = False
+
+for idx, entry in enumerate(data['dba_accounts']):
+    if entry['username'] == username:
+        existing_roles_set = set(role.upper() for role in entry.get('roles', []))
+        if existing_roles_set == input_roles_set:
+            print(f"✅ {username} already exists with same roles. No changes.")
+            break
+        else:
+            data['dba_accounts'][idx] = {
+                'username': username,
+                'roles': list(input_roles_set),
+                'password_var': password_var
+            }
+            updated = True
+            print(f"🔁 Updated roles for {username}.")
+            break
+else:
+    data['dba_accounts'].append({
+        'username': username,
+        'roles': list(input_roles_set),
+        'password_var': password_var
+    })
+    updated = True
+    print(f"➕ Added new entry for {username}.")
+
+if updated:
+    with VAULT_FILE_LIST.open("w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+
 #!/bin/bash
 
 # Configuration
 VAULT_ID="dba_vault"
 VAULT_PASS_FILE="/home/oracle/.vault_pass"
 VAULT_DIR="group_vars/dba_accounts"
-VAULT_FILE_LIST="${VAULT_DIR}/dba_accounts_list.yml"
+PYTHON_HELPER="./update_dba_accounts_list.py"
 VAR_NAME="dba_password"
-
 VALID_ROLES=("SYSDBA" "SYSBACKUP" "SYSOPER" "DBA")
 
 # Prompt for DBA ID
@@ -543,10 +595,9 @@ for role in "${ROLES_ARRAY[@]}"; do
   fi
 done
 
-ROLES_YAML=$(printf ", %s" "${VALIDATED_ROLES[@]}")
-ROLES_YAML="[${ROLES_YAML:2}]"
+ROLES_CSV=$(IFS=','; echo "${VALIDATED_ROLES[*]}")
 
-# Encrypt password
+# Encrypt password to per-user vault file
 mkdir -p "$VAULT_DIR"
 VAULT_FILE="${VAULT_DIR}/${USERNAME}.yml"
 TMPPASS=$(mktemp)
@@ -555,76 +606,13 @@ echo "$VAR_NAME: \"$PASSWORD\"" > "$TMPPASS"
 ansible-vault encrypt "$TMPPASS" --output "$VAULT_FILE" \
   --vault-id "$VAULT_ID@$VAULT_PASS_FILE"
 rm -f "$TMPPASS"
+echo "✅ Password vault saved to: $VAULT_FILE"
 
-# Ensure the list file exists and starts with dba_accounts:
-if [[ ! -s "$VAULT_FILE_LIST" ]]; then
-  echo "dba_accounts:" > "$VAULT_FILE_LIST"
+# Update the dba_accounts_list using Python
+if [[ ! -x "$PYTHON_HELPER" ]]; then
+  echo "❌ Python helper not found or not executable: $PYTHON_HELPER"
+  exit 1
 fi
 
-# Create a cleaned-up temporary YAML file
-TMPYAML=$(mktemp)
-FOUND=0
-UPDATED=0
-IN_BLOCK=0
-HEADER_WRITTEN=0
+"$PYTHON_HELPER" "$USERNAME" "$ROLES_CSV"
 
-{
-  while read -r line; do
-    if [[ "$line" =~ ^[[:space:]]*dba_accounts: ]]; then
-      echo "dba_accounts:"
-      HEADER_WRITTEN=1
-      continue
-    fi
-
-    if [[ "$line" =~ ^[[:space:]]*-[[:space:]]username: ]]; then
-      IN_BLOCK=1
-      USER_LINE="$line"
-      read -r ROLES_LINE
-      read -r PASS_LINE
-
-      CURRENT_USER=$(echo "$USER_LINE" | awk -F ': ' '{print $2}' | xargs)
-      CURRENT_ROLES=$(echo "$ROLES_LINE" | sed -E 's/.*\[([^\]]*)\].*/\1/' | tr -d ' ')
-
-      if [[ "$CURRENT_USER" == "$USERNAME" ]]; then
-        FOUND=1
-        INPUT_ROLES_JOINED=$(IFS=, ; echo "${VALIDATED_ROLES[*]}" | tr -d ' ')
-        if [[ "$CURRENT_ROLES" == "$INPUT_ROLES_JOINED" ]]; then
-          echo "  - username: $CURRENT_USER"
-          echo "    roles: [$CURRENT_ROLES]"
-          echo "    password_var: $VAR_NAME"
-          echo "✅ Entry for $USERNAME already exists with same roles. Skipping update." >&2
-        else
-          UPDATED=1
-          echo "  - username: $USERNAME"
-          echo "    roles: $ROLES_YAML"
-          echo "    password_var: $VAR_NAME"
-          echo "🔁 Updated roles for $USERNAME." >&2
-        fi
-      else
-        echo "$USER_LINE"
-        echo "$ROLES_LINE"
-        echo "$PASS_LINE"
-      fi
-    else
-      if [[ "$IN_BLOCK" -eq 0 && "$HEADER_WRITTEN" -eq 0 ]]; then
-        echo "$line"
-      fi
-    fi
-  done < "$VAULT_FILE_LIST"
-
-  # Append if not found
-  if [[ "$FOUND" -eq 0 ]]; then
-    if [[ "$HEADER_WRITTEN" -eq 0 ]]; then
-      echo "dba_accounts:"
-    fi
-    echo "  - username: $USERNAME"
-    echo "    roles: $ROLES_YAML"
-    echo "    password_var: $VAR_NAME"
-    echo "➕ Added new entry for $USERNAME." >&2
-  fi
-} > "$TMPYAML"
-
-mv "$TMPYAML" "$VAULT_FILE_LIST"
-
-echo "✅ Vault file: $VAULT_FILE"
-echo "✅ Metadata updated in: $VAULT_FILE_LIST"
