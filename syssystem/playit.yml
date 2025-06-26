@@ -215,7 +215,7 @@
       {{
         dict(
           cdb_check_results.results
-          | map(attribute='invocation.module_args.db_name')
+          | map(attribute='item') 
           | zip(
               cdb_check_results.results
               | map(attribute='stdout')
