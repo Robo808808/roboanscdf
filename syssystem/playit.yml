@@ -193,7 +193,12 @@
     export ORACLE_SID={{ db_name }}
     export ORACLE_HOME={{ oracle_home }}
     export PATH=$ORACLE_HOME/bin:$PATH
-    echo "SET HEADING OFF FEEDBACK OFF; SELECT CDB FROM V\$DATABASE;" | sqlplus -S / as sysdba
+    sqlplus -S / as sysdba <<EOF
+    SET HEADING OFF
+    SET FEEDBACK OFF
+    SELECT CDB FROM V\$DATABASE;
+    EXIT;
+    EOF
   loop: "{{ discovered_dbs }}"
   loop_control:
     loop_var: db_name
