@@ -1004,3 +1004,40 @@ else
   echo "❌ Invalid option."
   exit 1
 fi
+
+
+
+
+- name: Set Oracle environment variables
+  ansible.builtin.set_fact:
+    oracle_sid: "{{ oracle_sid | default(ansible_hostname | upper) }}"
+    oracle_home: "{{ oracle_home }}"   # define or register this beforehand
+    pwfile_path: "{{ oracle_home }}/dbs/orapw{{ oracle_sid }}"
+
+- name: Check if Oracle password file exists
+  ansible.builtin.stat:
+    path: "{{ pwfile_path }}"
+  register: pwfile_stat
+
+- name: Fail if password file not found
+  ansible.builtin.fail:
+    msg: "Oracle password file not found at {{ pwfile_path }}"
+  when: not pwfile_stat.stat.exists
+
+- name: Describe the Oracle password file format
+  ansible.builtin.command: "{{ oracle_home }}/bin/orapwd describe file={{ pwfile_path }}"
+  register: orapwd_output
+  changed_when: false
+
+- name: Extract password file format version
+  ansible.builtin.set_fact:
+    pwfile_format: "{{ orapwd_output.stdout | regex_search('format=(\\d+(\\.\\d+)?)', '\\1') }}"
+
+- name: Debug format
+  ansible.builtin.debug:
+    msg: "Password file format is {{ pwfile_format }}"
+
+- name: Fail if password file format is not 12.2
+  ansible.builtin.fail:
+    msg: "Password file format is not 12.2. Found {{ pwfile_format }}"
+  when: pwfile_format != '12.2'
