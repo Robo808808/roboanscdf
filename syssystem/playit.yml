@@ -200,19 +200,24 @@
   register: cdb_check_results
   changed_when: false
 
+- name: Debug CDB detection results
+  debug:
+    var: cdb_check_results.results
+
 - name: Set CDB fact map per DB
   set_fact:
     is_cdb_map: >-
       {{
         dict(
-          cdb_check_results.results | map(attribute='invocation.module_args.db_name') |
-          zip(
-            cdb_check_results.results |
-            map(attribute='stdout') |
-            map('trim') |
-            map('lower') |
-            map('regex_search', '^yes') |
-            map('bool')
+          cdb_check_results.results
+          | map(attribute='invocation.module_args.db_name')
+          | zip(
+              cdb_check_results.results
+              | map(attribute='stdout')
+              | map('trim')
+              | map('lower')
+              | map('regex_search', '^yes')
+              | map('bool')
           )
         )
       }}
