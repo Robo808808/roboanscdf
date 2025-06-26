@@ -556,52 +556,61 @@ ansible-vault encrypt "$TMPPASS" --output "$VAULT_FILE" \
   --vault-id "$VAULT_ID@$VAULT_PASS_FILE"
 rm -f "$TMPPASS"
 
-# Ensure dba_accounts_list.yml exists
-touch "$VAULT_FILE_LIST"
+# Ensure the list file exists and starts with dba_accounts:
+if [[ ! -s "$VAULT_FILE_LIST" ]]; then
+  echo "dba_accounts:" > "$VAULT_FILE_LIST"
+fi
 
-# Parse YAML using awk to rebuild content with replacement
+# Create a cleaned-up temporary YAML file
 TMPYAML=$(mktemp)
 FOUND=0
 UPDATED=0
+BLOCK_FOUND=0
 
+# Read and write logic block-by-block
 {
   echo "dba_accounts:"
-  while IFS= read -r line; do
-    if [[ "$line" =~ "username:" ]]; then
-      CURRENT_USER=$(echo "$line" | awk '{print $2}')
-      read -r roles_line
-      CURRENT_ROLES=$(echo "$roles_line" | sed -E 's/.*roles: *\[([^]]*)\].*/\1/' | xargs | tr -d ' ')
-      read -r pass_line
+  while read -r line; do
+    if [[ "$line" =~ ^[[:space:]]*-[[:space:]]username: ]]; then
+      BLOCK_FOUND=1
+      USER_LINE="$line"
+      read -r ROLES_LINE
+      read -r PASS_LINE
+
+      CURRENT_USER=$(echo "$USER_LINE" | awk -F ': ' '{print $2}' | xargs)
+      CURRENT_ROLES=$(echo "$ROLES_LINE" | sed -E 's/.*\[([^\]]*)\].*/\1/' | tr -d ' ')
 
       if [[ "$CURRENT_USER" == "$USERNAME" ]]; then
         FOUND=1
-        INPUT_ROLES_JOINED=$(IFS=, ; echo "${VALIDATED_ROLES[*]}")
-        if [[ "$CURRENT_ROLES" == "${INPUT_ROLES_JOINED// /}" ]]; then
-          echo "✅ Entry already exists with same roles. Skipping update."
-          echo "  - username: $CURRENT_USER"
-          echo "    roles: [$CURRENT_ROLES]"
-          echo "    password_var: $VAR_NAME"
+        INPUT_ROLES_JOINED=$(IFS=, ; echo "${VALIDATED_ROLES[*]}" | tr -d ' ')
+        if [[ "$CURRENT_ROLES" == "$INPUT_ROLES_JOINED" ]]; then
+          echo "$USER_LINE"
+          echo "$ROLES_LINE"
+          echo "$PASS_LINE"
+          echo "✅ Entry for $USERNAME already exists with same roles. Skipping update." >&2
         else
           UPDATED=1
-          echo "🔁 Updating roles for $CURRENT_USER"
-          echo "  - username: $CURRENT_USER"
+          echo "  - username: $USERNAME"
           echo "    roles: $ROLES_YAML"
           echo "    password_var: $VAR_NAME"
+          echo "🔁 Updated roles for $USERNAME." >&2
         fi
       else
-        echo "  - username: $CURRENT_USER"
-        echo "    roles: [$CURRENT_ROLES]"
-        echo "    password_var: $VAR_NAME"
+        echo "$USER_LINE"
+        echo "$ROLES_LINE"
+        echo "$PASS_LINE"
       fi
+    elif [[ "$BLOCK_FOUND" -eq 0 ]]; then
+      echo "$line"
     fi
-  done < <(grep -A2 "username:" "$VAULT_FILE_LIST")
+  done < "$VAULT_FILE_LIST"
 
-  # If not found, append new block
-  if [[ $FOUND -eq 0 ]]; then
-    echo "➕ Adding new entry for $USERNAME"
+  # Append if user not found
+  if [[ "$FOUND" -eq 0 ]]; then
     echo "  - username: $USERNAME"
     echo "    roles: $ROLES_YAML"
     echo "    password_var: $VAR_NAME"
+    echo "➕ Added new entry for $USERNAME." >&2
   fi
 } > "$TMPYAML"
 
