@@ -616,3 +616,84 @@ fi
 
 "$PYTHON_HELPER" "$USERNAME" "$ROLES_CSV"
 
+
+
+
+#!/usr/bin/env python3
+
+import yaml
+import sys
+import shutil
+from pathlib import Path
+from datetime import datetime
+from tempfile import NamedTemporaryFile
+
+# === CONFIGURATION ===
+VAULT_FILE_LIST = Path("group_vars/dba_accounts/dba_accounts_list.yml")
+BACKUP_SUFFIX = datetime.now().strftime("%Y%m%d_%H%M%S")
+BACKUP_FILE = VAULT_FILE_LIST.with_name(VAULT_FILE_LIST.stem + f".bak_{BACKUP_SUFFIX}.yml")
+
+# === INPUT ===
+if len(sys.argv) != 3:
+    print("Usage: update_dba_accounts_list.py DBA_<ID> SYSDBA,SYSBACKUP,...")
+    sys.exit(1)
+
+username = sys.argv[1]
+roles_input = sys.argv[2].split(",")
+password_var = "dba_password"
+
+# Ensure directory exists
+VAULT_FILE_LIST.parent.mkdir(parents=True, exist_ok=True)
+
+# Initialize file if missing
+if not VAULT_FILE_LIST.exists():
+    VAULT_FILE_LIST.write_text("dba_accounts: []\n")
+
+# Backup the original file
+shutil.copy2(VAULT_FILE_LIST, BACKUP_FILE)
+print(f"📦 Backup created: {BACKUP_FILE}")
+
+# Load YAML
+with VAULT_FILE_LIST.open("r") as f:
+    data = yaml.safe_load(f)
+
+# Initialize structure if needed
+if not data or 'dba_accounts' not in data:
+    data = {'dba_accounts': []}
+
+# Normalize roles
+input_roles_set = set(role.upper() for role in roles_input)
+updated = False
+
+# Process entries
+for idx, entry in enumerate(data['dba_accounts']):
+    if entry['username'] == username:
+        existing_roles_set = set(role.upper() for role in entry.get('roles', []))
+        if existing_roles_set == input_roles_set:
+            print(f"✅ {username} already exists with same roles. No changes.")
+            break
+        else:
+            data['dba_accounts'][idx] = {
+                'username': username,
+                'roles': sorted(list(input_roles_set)),
+                'password_var': password_var
+            }
+            updated = True
+            print(f"🔁 Updated roles for {username}.")
+            break
+else:
+    data['dba_accounts'].append({
+        'username': username,
+        'roles': sorted(list(input_roles_set)),
+        'password_var': password_var
+    })
+    updated = True
+    print(f"➕ Added new entry for {username}.")
+
+# Safe write
+if updated:
+    with NamedTemporaryFile("w", delete=False) as tmpf:
+        yaml.dump(data, tmpf, default_flow_style=False)
+        tmp_path = tmpf.name
+    shutil.move(tmp_path, VAULT_FILE_LIST)
+    print(f"✅ Updated: {VAULT_FILE_LIST}")
