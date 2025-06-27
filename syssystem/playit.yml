@@ -1041,3 +1041,42 @@ fi
   ansible.builtin.fail:
     msg: "Password file format is not 12.2. Found {{ pwfile_format }}"
   when: pwfile_format != '12.2'
+
+
+
+- name: Recreate password file if format is not 12.2
+  block:
+    - name: Set fully qualified password file and backup path
+      ansible.builtin.set_fact:
+        pwfile_path: "{{ oracle_home }}/dbs/orapw{{ oracle_sid }}"
+        pwfile_backup: "{{ oracle_home }}/dbs/orapw{{ oracle_sid }}.backup.{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+
+    - name: Backup original password file
+      ansible.builtin.command: mv "{{ pwfile_path }}" "{{ pwfile_backup }}"
+
+    - name: Recreate password file using orapwd with format 12.2
+      ansible.builtin.command: >
+        {{ oracle_home }}/bin/orapwd
+        file={{ pwfile_path }}
+        format=12.2
+        input_file={{ pwfile_backup }}
+
+    - name: Describe password file again to verify format
+      ansible.builtin.command: "{{ oracle_home }}/bin/orapwd describe file={{ pwfile_path }}"
+      register: orapwd_verify
+      changed_when: false
+
+    - name: Set fact with verified password file format
+      ansible.builtin.set_fact:
+        pwfile_format_recheck: "{{ orapwd_verify.stdout | regex_search('format=(\\d+(\\.\\d+)?)', '\\1') }}"
+
+    - name: Fail if recreated password file is not 12.2
+      ansible.builtin.fail:
+        msg: "❌ Recreated password file is not 12.2. Found {{ pwfile_format_recheck }}"
+      when: pwfile_format_recheck != '12.2'
+
+    - name: Report successful recreation
+      ansible.builtin.debug:
+        msg: "✅ Password file successfully recreated with format 12.2. Backup stored at {{ pwfile_backup }}"
+
+  when: pwfile_format != '12.2'
