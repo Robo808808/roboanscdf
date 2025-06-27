@@ -151,10 +151,31 @@
   register: dg_destinations
   changed_when: false
 
+- name: Extract unique TNS aliases from archive destinations
+  set_fact:
+    tns_aliases: >-
+      {{ dg_destinations.results
+         | map(attribute='stdout_lines')
+         | flatten
+         | map('regex_replace', '^.*@', '')
+         | unique
+      }}
+
+- name: Resolve each TNS alias to host using tnsping
+  become: true
+  become_user: oracle
+  shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    tnsping {{ item }} | grep "Attempting to contact" | sed -E 's/.*HOST *= *([^)]*).*/\1/'
+  loop: "{{ tns_aliases }}"
+  register: resolved_hosts
+  changed_when: false
+  failed_when: resolved_hosts.rc != 0
+
 - name: Extract unique standby hostnames
   set_fact:
-    detected_standbys: >-
-      {{ dg_destinations.results | map(attribute='stdout_lines') | list | flatten | map('regex_replace', '^.*@', '') | unique }}
+    detected_standbys: "{{ resolved_hosts.results | map(attribute='stdout') | map('trim') | select('match', '.+') | list | unique }}"
 
 # roles/manage_sys/tasks/sync.yml
 - name: Copy password files to each detected standby host
