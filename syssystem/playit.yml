@@ -1101,3 +1101,104 @@ fi
         msg: "✅ Password file successfully recreated with format 12.2. Backup stored at {{ pwfile_backup }}"
 
   when: pwfile_format != '12.2'
+
+
+
+- name: Configure Data Guard transport user
+  hosts: primary_db_hosts
+  become: yes
+  vars:
+    transport_user_cdb: "C##DBA_DGADMIN"
+    transport_user_non_cdb: "DBA_DGADMIN"
+    transport_user_password: "{{ vault_dba_dgadmin_password }}"
+    redo_user: ""
+  roles:
+    - dataguard_user_setup
+
+
+- name: Check redo_transport_user parameter
+  include_tasks: check_redo_transport_user.yml
+
+- name: Check if SYS account is locked
+  include_tasks: check_sys_locked.yml
+  when: redo_user == ""
+
+- name: Check and create transport user if needed
+  include_tasks: check_create_transport_user.yml
+  when: redo_user == "" and sys_locked.stdout.find("LOCKED") != -1
+
+- name: Sync password file to standby
+  include_tasks: sync_passwordfile.yml
+  when: redo_user == "" and sys_locked.stdout.find("LOCKED") != -1
+
+- name: Set redo_transport_user to new user
+  include_tasks: set_redo_transport_user.yml
+  when: redo_user == "" and sys_locked.stdout.find("LOCKED") != -1
+
+
+
+- name: Get current redo_transport_user
+  shell: |
+    . oraenv <<< {{ oracle_sid }}
+    sqlplus -s / as sysdba <<EOF
+    set heading off feedback off
+    show parameter redo_transport_user
+    exit
+    EOF
+  register: redo_user_check
+
+- set_fact:
+    redo_user: "{{ redo_user_check.stdout_lines | select('match', 'redo_transport_user') | list | first | regex_replace('.*\\s+', '') }}"
+
+- name: Check if SYS account is locked
+  shell: |
+    . oraenv <<< {{ oracle_sid }}
+    sqlplus -s / as sysdba <<EOF
+    set heading off feedback off
+    select account_status from dba_users where username='SYS';
+    exit
+    EOF
+  register: sys_locked
+
+- name: Determine if DB is CDB
+  shell: |
+    . oraenv <<< {{ oracle_sid }}
+    sqlplus -s / as sysdba <<EOF
+    set heading off feedback off
+    select cdb from v$database;
+    exit
+    EOF
+  register: is_cdb
+
+- set_fact:
+    dg_user: "{{ transport_user_cdb if is_cdb.stdout.find('YES') != -1 else transport_user_non_cdb }}"
+
+- name: Check if transport user exists
+  shell: |
+    . oraenv <<< {{ oracle_sid }}
+    sqlplus -s / as sysdba <<EOF
+    set heading off feedback off
+    select count(*) from dba_users where username='{{ dg_user }}';
+    exit
+    EOF
+  register: user_exists
+
+- name: Create DG transport user with SYSOPER if missing
+  shell: |
+    . oraenv <<< {{ oracle_sid }}
+    sqlplus -s / as sysdba <<EOF
+    create user {{ dg_user }} identified by "{{ transport_user_password }}";
+    grant sysoper to {{ dg_user }};
+    alter user {{ dg_user }} identified by "{{ transport_user_password }}";
+    exit
+    EOF
+  when: user_exists.stdout.find("0") != -1
+
+- name: Set redo_transport_user in SPFILE
+  shell: |
+    . oraenv <<< {{ oracle_sid }}
+    sqlplus -s / as sysdba <<EOF
+    alter system set redo_transport_user='{{ dg_user }}';
+    exit
+    EOF
+
