@@ -57,6 +57,10 @@ public class OracleDbTool {
             return;
         }
 
+        String serviceName = extractServiceName(url);
+        String logFile = "logs/" + serviceName + ".log";
+        new File("logs").mkdirs(); // ensure logs/ exists
+
         for (int i = 1; i <= execs; i++) {
             System.out.println("\n=== Execution " + i + " of " + execs + " ===");
 
@@ -70,18 +74,46 @@ public class OracleDbTool {
                     System.out.println("Running: " + key + " → " + sql);
                     long start = System.currentTimeMillis();
 
+                    StringBuilder logEntry = new StringBuilder();
+                    logEntry.append("\n=== ").append(key)
+                            .append(" | Execution ").append(i)
+                            .append(" | ").append(new java.util.Date()).append(" ===\n");
+                    logEntry.append("SQL: ").append(sql).append("\n");
+
                     try (ResultSet rs = stmt.executeQuery(sql)) {
-                        while (rs.next()) {
-                            // Consume result (no output)
+                        ResultSetMetaData meta = rs.getMetaData();
+                        int columnCount = meta.getColumnCount();
+
+                        StringBuilder resultOutput = new StringBuilder();
+                        for (int c = 1; c <= columnCount; c++) {
+                            resultOutput.append(meta.getColumnName(c)).append(c == columnCount ? "\n" : ",");
                         }
+
+                        while (rs.next()) {
+                            for (int c = 1; c <= columnCount; c++) {
+                                resultOutput.append(rs.getString(c)).append(c == columnCount ? "\n" : ",");
+                            }
+                        }
+
                         long elapsed = System.currentTimeMillis() - start;
                         stat.successCount++;
                         stat.totalTimeMillis += elapsed;
-                        System.out.println("Success (" + elapsed + " ms)");
+
+                        logEntry.append("Status: SUCCESS\n");
+                        logEntry.append("Elapsed: ").append(elapsed).append(" ms\n");
+
+                        if (stat.successCount == 1) {
+                            logEntry.append("Output:\n").append(resultOutput);
+                        }
+
                     } catch (SQLException sqle) {
                         stat.failureCount++;
-                        System.err.println("Failed: " + sqle.getMessage());
+                        logEntry.append("Status: FAILED\n");
+                        logEntry.append("Error: ").append(sqle.getMessage()).append("\n");
                     }
+
+                    logEntry.append("=== END OF EXECUTION ===\n");
+                    appendToFile(logFile, logEntry.toString());
                 }
 
             } catch (SQLException e) {
@@ -113,8 +145,24 @@ public class OracleDbTool {
         System.out.println("=========================");
     }
 
+    private static void appendToFile(String filename, String content) {
+        try (FileWriter writer = new FileWriter(filename, true)) {
+            writer.write(content);
+        } catch (IOException e) {
+            System.err.println("Failed to write to " + filename + ": " + e.getMessage());
+        }
+    }
+
     private static String truncate(String text, int length) {
         if (text.length() <= length) return text;
         return text.substring(0, length - 3) + "...";
+    }
+
+    private static String extractServiceName(String jdbcUrl) {
+        if (jdbcUrl == null) return "unknown";
+        int lastSlash = jdbcUrl.lastIndexOf('/');
+        return (lastSlash >= 0 && lastSlash + 1 < jdbcUrl.length())
+                ? jdbcUrl.substring(lastSlash + 1)
+                : "unknown";
     }
 }
