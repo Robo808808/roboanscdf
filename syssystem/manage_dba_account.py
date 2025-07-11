@@ -16,7 +16,7 @@ VAULT_DIR = Path("group_vars/dba_accounts")
 VAULT_FILE_LIST = VAULT_DIR / "dba_accounts_list.yml"
 VAULT_PASS_FILE = Path("/home/oracle/.vault_pass")
 VAULT_ID = "dba_vault"
-VALID_ROLES = {"DBA", "MONITOR", "OPERATOR"}
+VALID_ROLES = {"SYSDBA", "SYSOPER", "SYSDG", "SYSBACKUP", "DBA"}
 PASSWORD_VAR = "dba_password"
 
 # === FUNCTIONS ===
@@ -54,7 +54,7 @@ def encrypt_password_to_vault(username, password):
         "--output", str(vault_file),
         "--vault-id", f"{VAULT_ID}@{VAULT_PASS_FILE}"
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     Path(tmp_file.name).unlink()  # delete plain text
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip())
@@ -86,15 +86,15 @@ try:
 
     data = load_yaml_file(VAULT_FILE_LIST)
     accounts = data.get("dba_accounts", [])
-    found = next((a for a in accounts if a["name"] == username), None)
+    found = next((a for a in accounts if isinstance(a, dict) and a.get("username") == username), None)
 
     if action == "delete":
         if not found:
             json_output("error", f"User '{username}' not found")
-        accounts.remove(found)
+        found["status"] = "inactive"
         backup_file(VAULT_FILE_LIST)
         write_yaml_safely({"dba_accounts": accounts}, VAULT_FILE_LIST)
-        json_output("success", f"User '{username}' deleted")
+        json_output("success", f"User '{username}' marked as inactive")
 
     if action in ("create", "modify"):
         password = generate_password()
@@ -103,12 +103,19 @@ try:
         if action == "create":
             if found:
                 json_output("error", f"User '{username}' already exists")
-            accounts.append({"name": username, "roles": roles})
+            accounts.append({
+                "username": username,
+                "roles": roles,
+                "status": "active",
+                "password_var": PASSWORD_VAR
+            })
             message = f"User '{username}' created"
         else:  # modify
             if not found:
                 json_output("error", f"User '{username}' not found")
             found["roles"] = roles
+            found["status"] = "active"  # revive if previously inactive
+            found["password_var"] = PASSWORD_VAR
             message = f"User '{username}' modified"
 
         backup_file(VAULT_FILE_LIST)
