@@ -37,3 +37,30 @@
 - name: Print ownership check result
   debug:
     var: ownership_check.stdout_lines
+
+
+- name: Find process by name (case-insensitive)
+  shell: |
+    ps -eo user:20,comm,args | awk 'BEGIN{IGNORECASE=1} $0 ~ /{{ process_name }}/ { print $1, $2, $3 }'
+  register: process_info
+  changed_when: false
+
+- name: Fail if process not found
+  fail:
+    msg: "No process matching '{{ process_name }}' found"
+  when: process_info.stdout_lines | length == 0
+
+- name: Debug matched process lines
+  debug:
+    var: process_info.stdout_lines
+
+- name: Check process owner
+  shell: |
+    ps -eo user:20,comm,args | awk 'BEGIN{IGNORECASE=1} $0 ~ /{{ process_name }}/ { print $1 }' | uniq
+  register: process_owner
+  changed_when: false
+
+- name: Fail if process is not owned by expected user
+  fail:
+    msg: "Process '{{ process_name }}' is not owned by '{{ expected_owner }}'. Found: {{ process_owner.stdout_lines }}"
+  when: process_owner.stdout_lines | difference([expected_owner]) | length > 0
