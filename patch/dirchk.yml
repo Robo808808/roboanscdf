@@ -1,0 +1,39 @@
+- name: Get mount point of oracle_base
+  shell: |
+    df --output=target "{{ oracle_base }}" | tail -1
+  register: mount_point
+  changed_when: false
+
+- name: Set fact for mount point
+  set_fact:
+    oracle_mount_point: "{{ mount_point.stdout }}"
+
+- name: Find all directories from mount point to oracle_base
+  shell: |
+    base="{{ oracle_base }}"
+    mount="{{ oracle_mount_point }}"
+    dir="$base"
+    while [ "$dir" != "$mount" ]; do
+      echo "$dir"
+      dir=$(dirname "$dir")
+    done
+    echo "$mount"
+  register: dir_chain
+  changed_when: false
+
+- name: Check ownership of all dirs from mount point to oracle_base
+  shell: |
+    for d in {{ dir_chain.stdout_lines | reverse | join(' ') }}; do
+      owner=$(stat -c %U "$d")
+      if [ "$owner" != "oradinfa" ]; then
+        echo "$d is owned by $owner"
+        exit 1
+      fi
+    done
+  register: ownership_check
+  changed_when: false
+  failed_when: ownership_check.rc != 0
+
+- name: Print ownership check result
+  debug:
+    var: ownership_check.stdout_lines
