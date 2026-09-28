@@ -110,12 +110,19 @@ fn field(text: &str, label: &str) -> Option<String> {
 fn parse_configuration(text: &str) -> Result<(String, String, String, Vec<String>), String> {
     let config_name = Regex::new(r"(?im)^\s*Configuration\s+-\s*(\S+)").unwrap()
         .captures(text).map(|c| c[1].to_string()).ok_or("Configuration name missing")?;
-    let status = field(text, "Configuration Status").or_else(|| {
-        // SHOW CONFIGURATION places the value on the line after the label.
-        let lines: Vec<_> = text.lines().collect();
-        lines.iter().position(|line| line.trim().eq_ignore_ascii_case("Configuration Status:"))
-            .and_then(|i| lines.get(i + 1)).map(|s| s.trim().to_string())
-    }).filter(|s| !s.is_empty()).ok_or("Configuration status missing")?;
+    let status = field(text, "Configuration Status")
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            // DGMGRL normally prints the value beneath "Configuration Status:".
+            // Skip blank lines, but stop before another section or prompt.
+            let mut lines = text.lines();
+            lines.find(|line| line.trim().eq_ignore_ascii_case("Configuration Status:"))?;
+            lines.map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with("DGMGRL>"))
+                .map(str::to_string)
+        })
+        .and_then(|value| value.split_whitespace().next().map(str::to_string))
+        .ok_or("Configuration status missing")?;
     let member = Regex::new(r"(?i)^\s*([A-Za-z0-9_$#.-]+)\s+-\s+(Primary|Physical standby) database\b").unwrap();
     let mut primary = None;
     let mut standbys = Vec::new();
