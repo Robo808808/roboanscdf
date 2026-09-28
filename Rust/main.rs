@@ -1,18 +1,32 @@
-use axum::{
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    routing::get,
-    Json, Router,
-};
+use axum::{extract::State, http::{HeaderMap, StatusCode}, routing::{get, post}, Json, Router};
 use regex::Regex;
 use serde::Serialize;
-use std::{env, process::Command, sync::Arc};
+use std::{env, path::PathBuf, sync::Arc, time::Duration};
+use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex, time::timeout};
 
-// 1. App configuration state, populated from env vars on start
 struct AppConfig {
     api_key: String,
     sys_password: String,
-    oracle_home: String,
+    dgmgrl: PathBuf,
+    transition: Mutex<()>,
+}
+
+#[derive(Serialize)]
+struct DatabaseStatus {
+    name: String,
+    role: String,
+    dg_connect_identifier: String,
+    status: Option<String>,
+    transport_lag: Option<String>,
+    apply_lag: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DataGuardStatus {
+    configuration_name: String,
+    configuration_status: String,
+    primary: DatabaseStatus,
+    standbys: Vec<DatabaseStatus>,
 }
 
 #[derive(Serialize)]
@@ -22,147 +36,179 @@ struct ApiResponse {
     detail: String,
 }
 
+type ApiError = (StatusCode, Json<ApiResponse>);
+
+fn error(code: StatusCode, message: &str, detail: impl Into<String>) -> ApiError {
+    (code, Json(ApiResponse {
+        status: "error".into(), message: message.into(), detail: detail.into(),
+    }))
+}
+
+fn authorized(headers: &HeaderMap, key: &str) -> Result<(), ApiError> {
+    if headers.get("X-API-KEY").and_then(|v| v.to_str().ok()) == Some(key) {
+        Ok(())
+    } else {
+        Err(error(StatusCode::UNAUTHORIZED, "Unauthorized", "Missing or invalid X-API-KEY"))
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    // Read parameters from environment (like your FastAPI setup)
+    let oracle_home = env::var("ORACLE_HOME").expect("ORACLE_HOME is required");
+    let _ = env::var("ORACLE_SID").expect("ORACLE_SID is required");
+    let _ = env::var("TNS_ADMIN").expect("TNS_ADMIN is required");
+    let bind_address = env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let config = Arc::new(AppConfig {
-        api_key: env::var("API_KEY").expect("API_KEY environment variable is required"),
-        sys_password: env::var("SYS_PASSWORD").expect("SYS_PASSWORD environment variable is required"),
-        oracle_home: env::var("ORACLE_HOME").expect("ORACLE_HOME environment variable is required"),
+        api_key: env::var("API_KEY").expect("API_KEY is required"),
+        sys_password: env::var("SYS_PASSWORD").expect("SYS_PASSWORD is required"),
+        dgmgrl: PathBuf::from(oracle_home).join("bin/dgmgrl"),
+        transition: Mutex::new(()),
     });
-
-    // Verify TNS_ADMIN and ORACLE_SID are present just to fail early if missing
-    let _ = env::var("TNS_ADMIN").expect("TNS_ADMIN environment variable is required");
-    let _ = env::var("ORACLE_SID").expect("ORACLE_SID environment variable is required");
-
     let app = Router::new()
         .route("/status", get(get_status))
-        .route("/switchover", get(execute_switchover))
-        .with_state(config); // Shares our secure parameters across all async endpoints
-
-    // Bind to an unprivileged port suitable for non-root execution
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-    println!("DataGuard automation binary listening natively on port 8080...");
-    axum::serve(listener, app).await.unwrap();
+        .route("/switchover", post(execute_switchover))
+        .with_state(config);
+    let listener = tokio::net::TcpListener::bind(&bind_address).await.expect("bind failed");
+    println!("Listening on {bind_address}");
+    axum::serve(listener, app).await.expect("server failed");
 }
 
-// 2. Security Middleware Guard Function
-fn is_authorized(headers: &HeaderMap, expected_key: &str) -> bool {
-    if let Some(auth_header) = headers.get("X-API-KEY") {
-        if let Ok(key_str) = auth_header.to_str() {
-            return key_str == expected_key;
-        }
+// The script is sent over stdin. Credentials never become process arguments.
+// DGMGRL may echo input or include connection information in output: never return
+// or log raw output from a password-authenticated session.
+async fn broker(config: &AppConfig, script: &str) -> Result<String, String> {
+    let mut child = Command::new(&config.dgmgrl)
+        .arg("-silent")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn().map_err(|e| format!("Could not start DGMGRL: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("DGMGRL stdin unavailable")?;
+    stdin.write_all(script.as_bytes()).await.map_err(|e| format!("DGMGRL input failed: {e}"))?;
+    drop(stdin);
+    let out = timeout(Duration::from_secs(300), child.wait_with_output())
+        .await.map_err(|_| "DGMGRL timed out; inspect broker state before retrying".to_string())?
+        .map_err(|e| format!("DGMGRL failed: {e}"))?;
+    let text = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if !out.status.success() || Regex::new(r"(?m)^\s*(?:ORA|DGM)-\d{5}:").unwrap().is_match(&text) {
+        // Do not include text: it can contain a password supplied on stdin.
+        return Err(format!("DGMGRL reported an error (exit status: {})", out.status));
     }
-    false
+    Ok(text)
 }
 
-// Endpoint: GET /status
-async fn get_status(
-    headers: HeaderMap,
-    State(config): State<Arc<AppConfig>>,
-) -> (StatusCode, Json<ApiResponse>) {
-    if !is_authorized(&headers, &config.api_key) {
-        return (StatusCode::UNAUTHORIZED, Json(ApiResponse {
-            status: "error".to_string(),
-            message: "Unauthorized access".to_string(),
-            detail: "Missing or invalid X-API-KEY header".to_string(),
-        }));
-    }
-
-    // Call dgmgrl securely passing the local sys authentication string
-    let dgmgrl_path = format!("{}/bin/dgmgrl", config.oracle_home);
-    let cmd_output = Command::new(&dgmgrl_path)
-        .args(["/ ", "show configuration;"])
-        .output();
-
-    match cmd_output {
-        Ok(output) => {
-            let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
-            (StatusCode::OK, Json(ApiResponse {
-                status: "success".to_string(),
-                message: "DataGuard configuration retrieved successfully".to_string(),
-                detail: stdout_str,
-            }))
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse {
-            status: "error".to_string(),
-            message: "Failed to execute dgmgrl utility".to_string(),
-            detail: e.to_string(),
-        })),
-    }
+fn field(text: &str, label: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let (key, value) = line.trim().split_once(':')?;
+        if key.trim().eq_ignore_ascii_case(label) {
+            Some(value.trim().to_string())
+        } else { None }
+    })
 }
 
-// Endpoint: GET /switchover
-async fn execute_switchover(
-    headers: HeaderMap,
-    State(config): State<Arc<AppConfig>>,
-) -> (StatusCode, Json<ApiResponse>) {
-    if !is_authorized(&headers, &config.api_key) {
-        return (StatusCode::UNAUTHORIZED, Json(ApiResponse {
-            status: "error".to_string(),
-            message: "Unauthorized access".to_string(),
-            detail: "Missing or invalid X-API-KEY header".to_string(),
-        }));
+fn parse_configuration(text: &str) -> Result<(String, String, String, Vec<String>), String> {
+    let config_name = Regex::new(r"(?im)^\s*Configuration\s+-\s*(\S+)").unwrap()
+        .captures(text).map(|c| c[1].to_string()).ok_or("Configuration name missing")?;
+    let status = field(text, "Configuration Status").or_else(|| {
+        // SHOW CONFIGURATION places the value on the line after the label.
+        let lines: Vec<_> = text.lines().collect();
+        lines.iter().position(|line| line.trim().eq_ignore_ascii_case("Configuration Status:"))
+            .and_then(|i| lines.get(i + 1)).map(|s| s.trim().to_string())
+    }).filter(|s| !s.is_empty()).ok_or("Configuration status missing")?;
+    let member = Regex::new(r"(?i)^\s*([A-Za-z0-9_$#.-]+)\s+-\s+(Primary|Physical standby) database\b").unwrap();
+    let mut primary = None;
+    let mut standbys = Vec::new();
+    for line in text.lines() {
+        if let Some(c) = member.captures(line) {
+            if c[2].eq_ignore_ascii_case("Primary") { primary = Some(c[1].to_string()); }
+            else { standbys.push(c[1].to_string()); }
+        }
     }
+    let primary = primary.ok_or("Primary missing")?;
+    Ok((config_name, status, primary, standbys))
+}
 
-    let dgmgrl_path = format!("{}/bin/dgmgrl", config.oracle_home);
+fn parse_database(name: &str, text: &str) -> Result<DatabaseStatus, String> {
+    let property = Regex::new(r"(?im)^\s*DGConnectIdentifier\s*=\s*'([^']+)'\s*$").unwrap();
+    let dg_connect_identifier = property.captures(text).map(|c| c[1].to_string())
+        .ok_or_else(|| format!("DGConnectIdentifier missing for {name}"))?;
+    let role = field(text, "Role").ok_or_else(|| format!("Role missing for {name}"))?;
+    Ok(DatabaseStatus {
+        name: name.into(), role, dg_connect_identifier,
+        status: field(text, "Database Status"),
+        transport_lag: field(text, "Transport Lag"),
+        apply_lag: field(text, "Apply Lag"),
+    })
+}
 
-    // Step A: First run status check to dynamically parse out the Standby DG Identifier
-    let check_output = Command::new(&dgmgrl_path).args(["/ ", "show configuration;"]).output();
-    let standby_identifier = match check_output {
-        Ok(out) => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            // Quick regex pattern searching for common Broker output formats identifying standbys
-            let re = Regex::new(r"(?i)(\S+)\s+-\s+Physical standby database").unwrap();
-            if let Some(caps) = re.captures(&text) {
-                caps.get(1).map(|m| m.as_str().to_string())
-            } else {
-                None
-            }
-        }
-        Err(_) => None,
-    };
-
-    let target_db = match standby_identifier {
-        Some(db) => db,
-        None => {
-            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
-                status: "failed".to_string(),
-                message: "Switchover aborted".to_string(),
-                detail: "Could not automatically determine standalone Standby connect identifier from dgmgrl output.".to_string(),
-            }));
-        }
-    };
-
-    // Step B: Authenticate dynamically using password directly into dgmgrl to safely trigger target remount
-    let connect_string = format!("sys/{}@{}", config.sys_password, target_db);
-    let switch_command = format!("switchover to {};", target_db);
-
-    let final_output = Command::new(&dgmgrl_path)
-        .args([&connect_string, &switch_command])
-        .output();
-
-    match final_output {
-        Ok(output) => {
-            let raw_log = String::from_utf8_lossy(&output.stdout).to_string();
-            if raw_log.contains("Successful") || raw_log.contains("completed") {
-                (StatusCode::OK, Json(ApiResponse {
-                    status: "success".to_string(),
-                    message: format!("Database switchover to {} completed successfully.", target_db),
-                    detail: raw_log,
-                }))
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse {
-                    status: "failed".to_string(),
-                    message: "DataGuard dgmgrl script threw execution warning/errors.".to_string(),
-                    detail: raw_log,
-                }))
-            }
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse {
-            status: "error".to_string(),
-            message: "Failed to invoke target switchover instruction".to_string(),
-            detail: e.to_string(),
-        })),
+async fn inspect(config: &AppConfig) -> Result<DataGuardStatus, String> {
+    // Local OS authentication is used only to discover broker members and status.
+    let overview = broker(config, "connect /\nshow configuration;\nexit;\n").await?;
+    let (configuration_name, configuration_status, primary_name, standby_names) = parse_configuration(&overview)?;
+    let mut names = vec![primary_name.clone()];
+    names.extend(standby_names);
+    let mut databases = Vec::new();
+    for name in names {
+        // Names came from the broker listing and are restricted to safe characters.
+        let output = broker(config, &format!("connect /\nshow database verbose '{name}';\nexit;\n")).await?;
+        databases.push(parse_database(&name, &output)?);
     }
+    let primary = databases.remove(0);
+    if !primary.role.eq_ignore_ascii_case("PRIMARY") {
+        return Err("Broker primary role does not match the configuration listing".into());
+    }
+    Ok(DataGuardStatus { configuration_name, configuration_status, primary, standbys: databases })
+}
+
+async fn get_status(headers: HeaderMap, State(config): State<Arc<AppConfig>>)
+    -> Result<Json<DataGuardStatus>, ApiError>
+{
+    authorized(&headers, &config.api_key)?;
+    inspect(&config).await.map(Json)
+        .map_err(|e| error(StatusCode::BAD_GATEWAY, "Broker status unavailable", e))
+}
+
+async fn execute_switchover(headers: HeaderMap, State(config): State<Arc<AppConfig>>)
+    -> Result<Json<ApiResponse>, ApiError>
+{
+    authorized(&headers, &config.api_key)?;
+    let _guard = config.transition.try_lock().map_err(|_| error(
+        StatusCode::CONFLICT, "Switchover already in progress", "Try again after it completes"))?;
+    let before = inspect(&config).await.map_err(|e| error(StatusCode::BAD_GATEWAY, "Broker status unavailable", e))?;
+    if before.configuration_status != "SUCCESS" {
+        return Err(error(StatusCode::CONFLICT, "Configuration is not healthy", before.configuration_status));
+    }
+    if before.standbys.len() != 1 {
+        return Err(error(StatusCode::CONFLICT, "Target is ambiguous",
+            "Exactly one physical standby is required for automatic selection"));
+    }
+    let target = &before.standbys[0];
+    if !target.role.eq_ignore_ascii_case("PHYSICAL STANDBY") {
+        return Err(error(StatusCode::CONFLICT, "Target is not a physical standby", &target.role));
+    }
+    // Connect to the discovered standby with SYS password authentication. The
+    // DGConnectIdentifier is an Oracle Net address; SWITCHOVER TO takes the broker name.
+    let connect = format!("connect sys/{}@{}\n", config.sys_password, target.dg_connect_identifier);
+    let script = format!("{connect}validate database '{}';\nexit;\n", target.name);
+    let validation = broker(&config, &script).await
+        .map_err(|e| error(StatusCode::BAD_GATEWAY, "Validation failed", e))?;
+    let ready = Regex::new(r"(?im)^\s*Ready for Switchover:\s*Yes\s*$").unwrap();
+    if !ready.is_match(&validation) {
+        return Err(error(StatusCode::CONFLICT, "Standby is not ready for switchover",
+            "Check VALIDATE DATABASE in DGMGRL"));
+    }
+    let script = format!("{connect}switchover to '{}';\nexit;\n", target.name);
+    broker(&config, &script).await
+        .map_err(|e| error(StatusCode::BAD_GATEWAY, "Switchover outcome requires inspection", e))?;
+    let after = inspect(&config).await
+        .map_err(|e| error(StatusCode::BAD_GATEWAY, "Switchover outcome requires inspection", e))?;
+    if after.primary.name != target.name || after.configuration_status != "SUCCESS" {
+        return Err(error(StatusCode::BAD_GATEWAY, "Switchover outcome requires inspection",
+            "Broker does not yet report the target as a healthy primary"));
+    }
+    Ok(Json(ApiResponse {
+        status: "success".into(), message: format!("Switchover to {} completed", target.name),
+        detail: format!("{} is primary; configuration status is {}", target.name, after.configuration_status),
+    }))
 }
