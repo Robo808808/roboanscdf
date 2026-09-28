@@ -206,16 +206,26 @@ async fn execute_switchover(headers: HeaderMap, State(config): State<Arc<AppConf
             "Check VALIDATE DATABASE in DGMGRL"));
     }
     let script = format!("{connect}switchover to '{}';\nexit;\n", target.name);
-    broker(&config, &script).await
-        .map_err(|e| error(StatusCode::BAD_GATEWAY, "Switchover outcome requires inspection", e))?;
-    let after = inspect(&config).await
-        .map_err(|e| error(StatusCode::BAD_GATEWAY, "Switchover outcome requires inspection", e))?;
-    if after.primary.name != target.name || after.configuration_status != "SUCCESS" {
-        return Err(error(StatusCode::BAD_GATEWAY, "Switchover outcome requires inspection",
-            "Broker does not yet report the target as a healthy primary"));
+    // A role transition can complete even when DGMGRL reports a subsequent
+    // ORA-/DGM- message. Never repeat the switchover based on that message.
+    let command_result = broker(&config, &script).await;
+    for attempt in 0..5 {
+        if attempt > 0 { tokio::time::sleep(Duration::from_secs(2)).await; }
+        if let Ok(after) = inspect(&config).await {
+            if after.primary.name == target.name {
+                if after.configuration_status == "SUCCESS" {
+                    return Ok(Json(ApiResponse {
+                        status: "success".into(),
+                        message: format!("Switchover to {} completed", target.name),
+                        detail: format!("{} is primary; configuration status is SUCCESS", target.name),
+                    }));
+                }
+                return Err(error(StatusCode::BAD_GATEWAY, "Role changed; configuration needs attention",
+                    format!("{} is primary; configuration status is {}", target.name, after.configuration_status)));
+            }
+        }
     }
-    Ok(Json(ApiResponse {
-        status: "success".into(), message: format!("Switchover to {} completed", target.name),
-        detail: format!("{} is primary; configuration status is {}", target.name, after.configuration_status),
-    }))
+    Err(error(StatusCode::BAD_GATEWAY, "Switchover outcome requires inspection",
+        command_result.err().unwrap_or_else(||
+            "Target is not yet confirmed as primary; inspect broker before another request".into())))
 }
