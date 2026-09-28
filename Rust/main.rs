@@ -209,10 +209,13 @@ async fn execute_switchover(headers: HeaderMap, State(config): State<Arc<AppConf
     // A role transition can complete even when DGMGRL reports a subsequent
     // ORA-/DGM- message. Never repeat the switchover based on that message.
     let command_result = broker(&config, &script).await;
-    for attempt in 0..5 {
+    let mut changed_role = None;
+    for attempt in 0..10 {
         if attempt > 0 { tokio::time::sleep(Duration::from_secs(2)).await; }
         if let Ok(after) = inspect(&config).await {
-            if after.primary.name == target.name {
+            if after.primary.name == target.name &&
+                after.standbys.iter().any(|db| db.name == before.primary.name &&
+                    db.role.eq_ignore_ascii_case("PHYSICAL STANDBY")) {
                 if after.configuration_status == "SUCCESS" {
                     return Ok(Json(ApiResponse {
                         status: "success".into(),
@@ -220,10 +223,17 @@ async fn execute_switchover(headers: HeaderMap, State(config): State<Arc<AppConf
                         detail: format!("{} is primary; configuration status is SUCCESS", target.name),
                     }));
                 }
-                return Err(error(StatusCode::BAD_GATEWAY, "Role changed; configuration needs attention",
-                    format!("{} is primary; configuration status is {}", target.name, after.configuration_status)));
+                changed_role = Some(after.configuration_status);
             }
         }
+    }
+    if let Some(configuration_status) = changed_role {
+        return Ok(Json(ApiResponse {
+            status: "warning".into(),
+            message: format!("Switchover to {} completed; broker is not yet healthy", target.name),
+            detail: format!("{} is primary and {} is standby; configuration status is {}. Check /status and broker diagnostics if it persists.",
+                target.name, before.primary.name, configuration_status),
+        }));
     }
     Err(error(StatusCode::BAD_GATEWAY, "Switchover outcome requires inspection",
         command_result.err().unwrap_or_else(||
