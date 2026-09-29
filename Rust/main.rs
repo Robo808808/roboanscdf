@@ -1,8 +1,11 @@
-use axum::{extract::State, http::{HeaderMap, StatusCode}, routing::{get, post}, Json, Router};
+use axum::{extract::{Request, State}, http::{HeaderMap, StatusCode}, middleware::{self, Next}, response::Response, routing::{get, post}, Json, Router};
+use axum_server::tls_rustls::RustlsConfig;
 use regex::Regex;
 use serde::Serialize;
-use std::{env, path::PathBuf, sync::Arc, time::Duration};
+use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex, time::timeout};
+use tracing::{debug, error as log_error, info, warn};
+use tracing_subscriber::EnvFilter;
 
 struct AppConfig {
     api_key: String,
@@ -39,8 +42,14 @@ struct ApiResponse {
 type ApiError = (StatusCode, Json<ApiResponse>);
 
 fn error(code: StatusCode, message: &str, detail: impl Into<String>) -> ApiError {
+    let detail = detail.into();
+    if code.is_server_error() {
+        log_error!(%code, message, %detail, "API operation failed");
+    } else {
+        warn!(%code, message, %detail, "API operation rejected");
+    }
     (code, Json(ApiResponse {
-        status: "error".into(), message: message.into(), detail: detail.into(),
+        status: "error".into(), message: message.into(), detail,
     }))
 }
 
@@ -54,10 +63,21 @@ fn authorized(headers: &HeaderMap, key: &str) -> Result<(), ApiError> {
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("dataguard_api=info")))
+        .init();
     let oracle_home = env::var("ORACLE_HOME").expect("ORACLE_HOME is required");
     let _ = env::var("ORACLE_SID").expect("ORACLE_SID is required");
     let _ = env::var("TNS_ADMIN").expect("TNS_ADMIN is required");
-    let bind_address = env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8080".into());
+    let bind_address: SocketAddr = env::var("BIND_ADDRESS")
+        .unwrap_or_else(|_| "127.0.0.1:8443".into())
+        .parse().expect("BIND_ADDRESS must be IP:port");
+    let cert_path = env::var("TLS_CERT_PATH").expect("TLS_CERT_PATH is required");
+    let key_path = env::var("TLS_KEY_PATH").expect("TLS_KEY_PATH is required");
+    let tls = RustlsConfig::from_pem_file(cert_path, key_path).await
+        .expect("Could not load TLS certificate and private key");
     let config = Arc::new(AppConfig {
         api_key: env::var("API_KEY").expect("API_KEY is required"),
         sys_password: env::var("SYS_PASSWORD").expect("SYS_PASSWORD is required"),
@@ -67,16 +87,40 @@ async fn main() {
     let app = Router::new()
         .route("/status", get(get_status))
         .route("/switchover", post(execute_switchover))
+        .layer(middleware::from_fn(log_request))
         .with_state(config);
-    let listener = tokio::net::TcpListener::bind(&bind_address).await.expect("bind failed");
-    println!("Listening on {bind_address}");
-    axum::serve(listener, app).await.expect("server failed");
+    info!(%bind_address, "HTTPS listener starting");
+    axum_server::bind_rustls(bind_address, tls)
+        .serve(app.into_make_service()).await.expect("HTTPS server failed");
+}
+
+async fn log_request(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned(); // omit query string and headers
+    info!(%method, %path, "API request received");
+    let start = Instant::now();
+    let response = next.run(request).await;
+    let status = response.status();
+    let duration_ms = start.elapsed().as_millis();
+    if status.is_server_error() {
+        log_error!(%method, %path, %status, duration_ms, "API request failed");
+    } else if status.is_client_error() {
+        warn!(%method, %path, %status, duration_ms, "API request rejected");
+    } else {
+        info!(%method, %path, %status, duration_ms, "API request completed");
+    }
+    response
 }
 
 // The script is sent over stdin. Credentials never become process arguments.
 // DGMGRL may echo input or include connection information in output: never return
 // or log raw output from a password-authenticated session.
 async fn broker(config: &AppConfig, script: &str) -> Result<String, String> {
+    let operation = if script.contains("switchover to") { "switchover" }
+        else if script.contains("validate database") { "validate" }
+        else if script.contains("show database") { "show_database" }
+        else { "show_configuration" };
+    debug!(operation, "DGMGRL invocation started");
     let mut child = Command::new(&config.dgmgrl)
         .arg("-silent")
         .stdin(std::process::Stdio::piped())
@@ -91,10 +135,14 @@ async fn broker(config: &AppConfig, script: &str) -> Result<String, String> {
         .await.map_err(|_| "DGMGRL timed out; inspect broker state before retrying".to_string())?
         .map_err(|e| format!("DGMGRL failed: {e}"))?;
     let text = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    if !out.status.success() || Regex::new(r"(?m)^\s*(?:ORA|DGM)-\d{5}:").unwrap().is_match(&text) {
+    let codes: Vec<String> = Regex::new(r"(?m)^\s*((?:ORA|DGM)-\d{5}):").unwrap()
+        .captures_iter(&text).map(|c| c[1].to_string()).collect();
+    if !out.status.success() || !codes.is_empty() {
         // Do not include text: it can contain a password supplied on stdin.
+        warn!(operation, exit_status = %out.status, error_codes = ?codes, "DGMGRL reported an error");
         return Err(format!("DGMGRL reported an error (exit status: {})", out.status));
     }
+    debug!(operation, exit_status = %out.status, "DGMGRL invocation completed");
     Ok(text)
 }
 
@@ -183,6 +231,8 @@ async fn execute_switchover(headers: HeaderMap, State(config): State<Arc<AppConf
     let _guard = config.transition.try_lock().map_err(|_| error(
         StatusCode::CONFLICT, "Switchover already in progress", "Try again after it completes"))?;
     let before = inspect(&config).await.map_err(|e| error(StatusCode::BAD_GATEWAY, "Broker status unavailable", e))?;
+    info!(primary = %before.primary.name, configuration_status = %before.configuration_status,
+        "Switchover requested");
     if before.configuration_status != "SUCCESS" {
         return Err(error(StatusCode::CONFLICT, "Configuration is not healthy", before.configuration_status));
     }
@@ -217,6 +267,7 @@ async fn execute_switchover(headers: HeaderMap, State(config): State<Arc<AppConf
                 after.standbys.iter().any(|db| db.name == before.primary.name &&
                     db.role.eq_ignore_ascii_case("PHYSICAL STANDBY")) {
                 if after.configuration_status == "SUCCESS" {
+                    info!(new_primary = %target.name, "Switchover verified");
                     return Ok(Json(ApiResponse {
                         status: "success".into(),
                         message: format!("Switchover to {} completed", target.name),
@@ -228,6 +279,8 @@ async fn execute_switchover(headers: HeaderMap, State(config): State<Arc<AppConf
         }
     }
     if let Some(configuration_status) = changed_role {
+        warn!(new_primary = %target.name, %configuration_status,
+            "Role transition verified; broker health pending");
         return Ok(Json(ApiResponse {
             status: "warning".into(),
             message: format!("Switchover to {} completed; broker is not yet healthy", target.name),
