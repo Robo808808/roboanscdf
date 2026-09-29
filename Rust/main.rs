@@ -1,5 +1,4 @@
 use axum::{extract::{Request, State}, http::{HeaderMap, StatusCode}, middleware::{self, Next}, response::Response, routing::{get, post}, Json, Router};
-use axum_server::tls_rustls::RustlsConfig;
 use regex::Regex;
 use serde::Serialize;
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::{Duration, Instant}};
@@ -72,12 +71,8 @@ async fn main() {
     let _ = env::var("ORACLE_SID").expect("ORACLE_SID is required");
     let _ = env::var("TNS_ADMIN").expect("TNS_ADMIN is required");
     let bind_address: SocketAddr = env::var("BIND_ADDRESS")
-        .unwrap_or_else(|_| "127.0.0.1:8443".into())
+        .unwrap_or_else(|_| "127.0.0.1:8080".into())
         .parse().expect("BIND_ADDRESS must be IP:port");
-    let cert_path = env::var("TLS_CERT_PATH").expect("TLS_CERT_PATH is required");
-    let key_path = env::var("TLS_KEY_PATH").expect("TLS_KEY_PATH is required");
-    let tls = RustlsConfig::from_pem_file(cert_path, key_path).await
-        .expect("Could not load TLS certificate and private key");
     let config = Arc::new(AppConfig {
         api_key: env::var("API_KEY").expect("API_KEY is required"),
         sys_password: env::var("SYS_PASSWORD").expect("SYS_PASSWORD is required"),
@@ -89,9 +84,9 @@ async fn main() {
         .route("/switchover", post(execute_switchover))
         .layer(middleware::from_fn(log_request))
         .with_state(config);
-    info!(%bind_address, "HTTPS listener starting");
-    axum_server::bind_rustls(bind_address, tls)
-        .serve(app.into_make_service()).await.expect("HTTPS server failed");
+    let listener = tokio::net::TcpListener::bind(bind_address).await.expect("bind failed");
+    info!(%bind_address, "HTTP listener starting");
+    axum::serve(listener, app).await.expect("HTTP server failed");
 }
 
 async fn log_request(request: Request, next: Next) -> Response {
